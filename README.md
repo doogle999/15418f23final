@@ -1,1 +1,1 @@
-[Proposal](Proposal15418.pdf)
+[Proposal](writtens/Proposal15418.pdf)
