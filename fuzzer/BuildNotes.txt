@@ -1,0 +1,2 @@
+Possibly notable, though super old.:
+https://anhnguyen.me/2013/12/how-to-mix-mpi-and-cuda-in-a-single-program/
