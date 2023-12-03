@@ -64,6 +64,9 @@ void runInstruction(State& state, uint32_t inst, uint8_t* memory)
 
 	uint32_t opcode = inst & 0x7f;
 
+	// I literally just put these in the order they are in as I read them from page 106 of the
+	// RISCV user guide version 2.2 lol
+	// There are certainly better ways to do this!
 	switch(opcode)
 	{
 		case 0x37: // lui
@@ -447,6 +450,7 @@ int main(int argc, char** argv)
 	State state;
 	initState(state);
 	// We initalize a fake return address so that we can tell when we're done lol
+	// Make sure it's 4 byte aligned!
 	uint32_t const DONE_ADDRESS = 0xfffffff0; 
 	state.x[1] = DONE_ADDRESS;
 
@@ -461,7 +465,6 @@ int main(int argc, char** argv)
 		printf("pc = %x\n", state.pc);
 		if(state.pc == DONE_ADDRESS)
 		{
-			
 			break;
 		}
 	}
