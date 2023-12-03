@@ -460,9 +460,9 @@ int main(int argc, char** argv)
 	while(1)
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
-		printf("executing instruction: %x\n", inst);
+		printf("executing instruction: %08x\n", inst);
 		runInstruction(state, inst, memory);
-		printf("pc = %x\n", state.pc);
+		printf("pc = %u\n", state.pc);
 		if(state.pc == DONE_ADDRESS)
 		{
 			break;
