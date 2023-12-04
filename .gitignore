@@ -1,2 +1,3 @@
 /fuzzer/cmake-build-debug/
 /fuzzer/cmake-build-release/
+/ajaxemu/a.out

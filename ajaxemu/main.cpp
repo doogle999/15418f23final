@@ -470,13 +470,13 @@ int main(int argc, char** argv)
 	}
 
 	uint32_t const BYTES_PER_LINE = 4 * 4;
-	for(uint32_t i = 0; i < memorySize; i += 4)
+	for(uint32_t i = 0; i < memorySize; i += 1)
 	{
 		if(i % BYTES_PER_LINE == 0)
 		{
 			printf("\n");
 		}
-		printf("%08x ", *(uint32_t*)(memory + i));
+		printf("%02x ", *(uint8_t*)(memory + i));
 	}
 	printf("\n");
 
