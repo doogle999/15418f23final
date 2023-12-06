@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.27)
 project(fuzzer LANGUAGES CXX CUDA)
 
 set(CMAKE_CUDA_STANDARD 23)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message(STATUS "C++ compiler ID: ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "C++ compiler version: ${CMAKE_CXX_COMPILER_VERSION}")
@@ -28,6 +29,4 @@ target_link_libraries(fuzzer PRIVATE ${MPI_C_LIBRARIES})
 find_package(Boost REQUIRED COMPONENTS mpi serialization)
 target_link_libraries(fuzzer ${Boost_LIBRARIES})
 
-set_target_properties(fuzzer PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON)
-
+set_target_properties(fuzzer PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
