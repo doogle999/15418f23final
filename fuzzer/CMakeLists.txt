@@ -15,11 +15,14 @@ add_executable(fuzzer ${FUZZER_SOURCES})
 
 # Add packages. For now, most of these aren't necessary.
 
+find_package(spdlog REQUIRED)
+target_link_libraries(example_header_only PRIVATE spdlog::spdlog_header_only)
+
 #find_package(fmt CONFIG REQUIRED)
 #target_link_libraries(fuzzer PRIVATE fmt::fmt)
 #
-#find_package(asmjit CONFIG REQUIRED)
-#target_link_libraries(fuzzer PRIVATE asmjit::asmjit)
+find_package(asmjit CONFIG REQUIRED)
+target_link_libraries(fuzzer PRIVATE asmjit::asmjit)
 #
 #find_package(doctest CONFIG REQUIRED)
 #target_link_libraries(fuzzer PRIVATE doctest::doctest)

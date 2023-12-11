@@ -382,7 +382,7 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
 void ClassicalBackend::run() {
     while (true) {
         auto instruction = *reinterpret_cast<std::uint32_t*>(program + state.pc);
-        printf("executing instruction: %x\n", instruction);
+        printf("executing raw: %x\n", instruction);
         runInstruction(state, instruction, memory);
         printf("pc = %x\n", state.pc);
         if (state.pc == DONE_ADDRESS) {

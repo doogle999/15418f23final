@@ -1,8 +1,9 @@
 #include <iostream>
 
 #include "backends/AVX512Backend.h"
+#include "spdlog/spdlog.h"
 
-void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
+void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
     // Step 1: Figure out instruction length
     // Instructions come in 16 bit increments
     // 16 bit: lowest two bits != 11
@@ -30,23 +31,23 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
     // Normally this is the destination register, but in S and B type instructions
     // where there is not destination register these same bits communicate parts of an immediate
     // value. We always need to look at these bits as a unit no matter what
-    const auto rd = (inst >> 7) & 0x1f; // Bits 11 to 7
+    const auto rd = (instruction >> 7) & 0x1f; // Bits 11 to 7
 
-    const auto opcode = inst & 0x7f;
+    const auto opcode = instruction & 0x7f;
 
     switch (opcode) {
         case 0x37: // lui
         {
             // We don't need to load it into low bits, then reshift it into high bits... can just read the bits in
             // place! Lower bits are filled with zeros according to standard
-            state.x[rd] = inst & 0xfffff000;
+            state.x[rd] = instruction & 0xfffff000;
             state.pc += 4;
             break;
         }
         case 0x17: // auipc
         {
             // Mirrors the above, but result is imm + offset from pc
-            state.x[rd] = state.pc + (inst & 0xfffff000);
+            state.x[rd] = state.pc + (instruction & 0xfffff000);
             state.pc += 4;
             break;
         }
@@ -58,12 +59,12 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
             // Since right shift doing sign extension is implementation dependent, and
             // this wants sign extension, we do it manually...
             // also, yes, this is correct -- it doesn't set lsb
-            std::uint32_t imm = ((inst & (1u << 31)) >> 11) | ((inst & 0x7fe00000) >> 20) | ((inst & 0x00100000) >> 9) |
-                                (inst & 0x000ff000);
+            std::uint32_t imm = ((instruction & (1u << 31)) >> 11) | ((instruction & 0x7fe00000) >> 20) |
+                                ((instruction & 0x00100000) >> 9) | (instruction & 0x000ff000);
             state.x[rd] = state.pc + 4;
             // Two cases: either our machine does sign extension and this is redundant, or it defaults to 0 extension
             // and we need this No machine will default to 1 extension so we're all good
-            if (inst & (1u << 31)) {
+            if (instruction & (1u << 31)) {
                 imm |= 0xffe00000;
             }
             state.pc += imm;
@@ -72,11 +73,11 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         case 0x67: // jalr
         {
             // This wants us to use a temporary in case the destination register and source register are the same
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
             std::uint32_t temp = state.pc + 4;
             // Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
-            std::uint32_t imm = (inst >> 20);
-            if (inst & (1u << 31)) {
+            std::uint32_t imm = (instruction >> 20);
+            if (instruction & (1u << 31)) {
                 imm |= 0xfffff000;
             }
             state.pc = (state.x[rs1] + imm) & ~1;
@@ -85,18 +86,18 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         }
         case 0x63: // beq, bne, blt, bge, bltu, bgeu
         {
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
-            std::uint32_t rs2 = (inst >> 20) & 0x1f;
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
+            std::uint32_t rs2 = (instruction >> 20) & 0x1f;
             // The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
             // 31 -> 12 == 19, 30 -> 10 == 20, 4 -> 4 == 0, 0 -> 11 == -11
             // we have to sign extend again as well
-            std::uint32_t imm =
-                    ((inst & (1u << 31)) >> 19) | ((inst & 0x7e000000) >> 20) | (rd & 0x1e) | ((rd & 0x1) << 11);
-            if (inst & (1u << 31)) {
+            std::uint32_t imm = ((instruction & (1u << 31)) >> 19) | ((instruction & 0x7e000000) >> 20) | (rd & 0x1e) |
+                                ((rd & 0x1) << 11);
+            if (instruction & (1u << 31)) {
                 imm |= 0xffffe000;
             }
             // funct3 (bits 14:12) determines which of the comparisons to do
-            switch ((inst >> 12) & 0x7) {
+            switch ((instruction >> 12) & 0x7) {
                 case 0x0: // beq
                 {
                     if (state.x[rs1] == state.x[rs2]) {
@@ -146,14 +147,14 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         }
         case 0x03: // lb, lh, lw, lbu, lhu
         {
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
             // Same format as jalr
-            std::uint32_t imm = (inst >> 20);
-            if (inst & (1u << 31)) {
+            std::uint32_t imm = (instruction >> 20);
+            if (instruction & (1u << 31)) {
                 imm |= 0xfffff000;
             }
             // funct3 again
-            switch ((inst >> 12) & 0x7) {
+            switch ((instruction >> 12) & 0x7) {
                 case 0x0: // lb
                 {
                     uint8_t loaded = *(memory + (state.x[rs1] + imm));
@@ -192,13 +193,13 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         {
             // In this one, we reuse rs1 as the memory location (well plus the immediate offset) and we use rs2 as the
             // source This means the immediate is split up again
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
-            std::uint32_t rs2 = (inst >> 20) & 0x1f;
-            std::uint32_t imm = ((inst & 0xfe000000) >> 20) | rd;
-            if (inst & (1u << 31)) {
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
+            std::uint32_t rs2 = (instruction >> 20) & 0x1f;
+            std::uint32_t imm = ((instruction & 0xfe000000) >> 20) | rd;
+            if (instruction & (1u << 31)) {
                 imm |= 0xfffff000;
             }
-            switch ((inst >> 12) & 0x7) {
+            switch ((instruction >> 12) & 0x7) {
                 case 0x0: // sb
                 {
                     *(memory + (state.x[rs1] + imm)) = state.x[rs2];
@@ -221,13 +222,13 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         }
         case 0x13: // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
         {
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
-            std::uint32_t imm = (inst >> 20);
-            if (inst & (1u << 31)) {
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
+            std::uint32_t imm = (instruction >> 20);
+            if (instruction & (1u << 31)) {
                 imm |= 0xfffff000;
             }
             // funct3 again
-            switch ((inst >> 12) & 0x7) {
+            switch ((instruction >> 12) & 0x7) {
                 case 0x0: // addi
                 {
                     state.x[rd] = state.x[rs1] + imm;
@@ -271,7 +272,7 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
                 case 0x5: // srli, srai are differentiated by a 1 in the 30th bit
                 {
                     std::uint32_t shamt = imm & 0x1f;
-                    if (inst & (1u << 30)) {
+                    if (instruction & (1u << 30)) {
                         state.x[rd] = static_cast<int32_t>(state.x[rs1]) >> shamt;
                         if ((state.x[rs1] & (1u << 31)) && shamt) {
                             // Bit shifts by 32 are undefined by c standard so we actually can't use this which is
@@ -290,14 +291,14 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         }
         case 0x33: // add, sub, sll, slt, sltu, xor, srl, sra, or, and
         {
-            const auto rs1 = (inst >> 15) & 0x1f;
-            const auto rs2 = (inst >> 20) & 0x1f;
-            switch ((inst >> 12) & 0x7) {
+            const auto rs1 = (instruction >> 15) & 0x1f;
+            const auto rs2 = (instruction >> 20) & 0x1f;
+            switch ((instruction >> 12) & 0x7) {
                 case 0x0: // add, sub are differentiated again by funct7 (only 1 bit of it tho), inst bit 30
                 {
                     // Oh and arithmetic overflow is ignored (aka we don't care, and you know what, just use what our
                     // implementation does) This isn't 122
-                    if (inst & (1u << 30)) // add
+                    if (instruction & (1u << 30)) // add
                     {
                         state.x[rd] = state.x[rs1] + state.x[rs2];
                     } else // sub
@@ -332,7 +333,7 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
                 case 0x5: // srl, sra
                 {
                     std::uint32_t shamt = state.x[rs2] & 0x1f;
-                    if (inst & (1u << 30)) {
+                    if (instruction & (1u << 30)) {
                         state.x[rd] = static_cast<int32_t>(state.x[rs1]) >> shamt;
                         if (state.x[rs1] & (1u << 31) && shamt) {
                             state.x[rd] |= ~0 << (32 - shamt);
@@ -379,6 +380,8 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
     }
 }
 
+void simdRunInstruction(AVX512State& state, MachineWord instruction, uint8_t* memory) {}
+
 void AVX512Backend::run() {
     while (true) {
         auto instruction = *reinterpret_cast<std::uint32_t*>(program + state.pc);
@@ -399,3 +402,95 @@ void AVX512Backend::run() {
     }
     printf("\n");
 }
+
+static void AVX512Backend::emitInstruction(const Instruction& instruction) {
+    using namespace asmjit;
+    const auto opcode = static_cast<Opcode>(instruction.opcode());
+
+    // TODO: Think harder about memory layout + masking :(
+    switch (opcode) {
+        case Opcode::LUI: {
+            const auto imm = (instruction.raw >> 12) & 0x000fffff;
+            const auto avxImm = _mm512_set1_epi32(imm << 12);
+
+            assembler.vmovdqa32(asmjit::x86::zmm(instruction.rd()), avxImm);
+            break;
+        }
+        case Opcode::AUIPC: {
+            const auto imm = (instruction.raw >> 12) & 0x000fffff;
+            const auto avxImm = _mm512_set1_epi32(imm << 12);
+
+            const auto src = _mm512_add_epi32(state.pc, avxImm);
+            const auto dst = asmjit::x86::zmm(instruction.rd());
+
+            assembler.vmovdqa32(dst, src);
+            break;
+        }
+        case Opcode::JAL: {
+            // TODO
+            break;
+        }
+        case Opcode::JALR: {
+            // TODO
+            break;
+        }
+        case Opcode::BRANCH: {
+            // TODO
+            break;
+        }
+        case Opcode::LOAD: {
+            // TODO
+            break;
+        }
+        case Opcode::STORE: {
+            // TODO
+            break;
+        }
+        case Opcode::IMM: {
+            // TODO
+            break;
+        }
+        case Opcode::ARITH: {
+            const auto funct7 = instruction.funct7();
+
+            switch (instruction.funct3()) {
+                case 0x00: {
+                    if (funct7 == 0x00) { // ADD
+                        const auto rs1 = asmjit::x86::zmm(instruction.rs1());
+                        const auto rs2 = asmjit::x86::zmm(instruction.rs2());
+                        const auto dst = asmjit::x86::zmm(instruction.rd());
+                        assembler.vpaddq(dst, rs1, rs2);
+                    } else if (funct7 == 0x20) { // SUB
+                        const auto rs1 = asmjit::x86::zmm(instruction.rs1());
+                        const auto rs2 = asmjit::x86::zmm(instruction.rs2());
+                        const auto dst = asmjit::x86::zmm(instruction.rd());
+                        assembler.vpsubq(dst, rs1, rs2);
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+        case Opcode::MEMORY: {
+            assembler.mfence(); // god bless ;-;
+            break;
+        }
+        case Opcode::SYSCALL: {
+            spdlog::error("Syscalls are currently unsupported!");
+            break;
+        }
+        default: {
+            spdlog::error("Invalid instruction: 0x{:08x}", instruction.raw);
+            break;
+        }
+    }
+
+    // assembler.emit(); // Increment PC
+}
+
+AVX512Backend::AVX512Backend(uint8_t* memory, State state) : MachineBackend(memory, state) {
+    this->memory = memory;
+    this->program = memory + MEMORY_SIZE;
+}
+
+AVX512Backend::AVX512Backend() {}
