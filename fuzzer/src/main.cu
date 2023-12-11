@@ -5,9 +5,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "backends/MachineBackend.h"
-#include "backends/ClassicalBackend.h"
-#include "backends/AVX512Backend.h"
+#include "backends/AVX512Backend.hpp"
+#include "backends/ClassicalBackend.hpp"
+#include "backends/MachineBackend.hpp"
 
 int main(int argc, char** argv) {
     if (argc != 2) {

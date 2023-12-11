@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "backends/AVX512Backend.h"
+#include "backends/AVX512Backend.hpp"
 #include "spdlog/spdlog.h"
 
 void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
@@ -73,14 +73,14 @@ void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
         case 0x67: // jalr
         {
             // This wants us to use a temporary in case the destination register and source register are the same
-            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
+            std::uint32_t rs1  = (instruction >> 15) & 0x1f;
             std::uint32_t temp = state.pc + 4;
             // Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
             std::uint32_t imm = (instruction >> 20);
             if (instruction & (1u << 31)) {
                 imm |= 0xfffff000;
             }
-            state.pc = (state.x[rs1] + imm) & ~1;
+            state.pc    = (state.x[rs1] + imm) & ~1;
             state.x[rd] = temp;
             break;
         }
@@ -158,13 +158,13 @@ void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
                 case 0x0: // lb
                 {
                     uint8_t loaded = *(memory + (state.x[rs1] + imm));
-                    state.x[rd] = (loaded & (1u << 7)) ? loaded | 0xffffff00 : loaded;
+                    state.x[rd]    = (loaded & (1u << 7)) ? loaded | 0xffffff00 : loaded;
                     break;
                 }
                 case 0x1: // lh
                 {
                     uint16_t loaded = *reinterpret_cast<uint16_t*>(memory + (state.x[rs1] + imm));
-                    state.x[rd] = (loaded & (1u << 15)) ? loaded | 0xffff0000 : loaded;
+                    state.x[rd]     = (loaded & (1u << 15)) ? loaded | 0xffff0000 : loaded;
                     break;
                 }
                 case 0x2: // lw
@@ -175,13 +175,13 @@ void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
                 case 0x4: // lbu
                 {
                     uint8_t loaded = *(memory + (state.x[rs1] + imm));
-                    state.x[rd] = loaded & 0x000000ff;
+                    state.x[rd]    = loaded & 0x000000ff;
                     break;
                 }
                 case 0x5: // lhu
                 {
                     uint16_t loaded = *reinterpret_cast<uint16_t*>(memory + (state.x[rs1] + imm));
-                    state.x[rd] = loaded & 0x0000ffff;
+                    state.x[rd]     = loaded & 0x0000ffff;
                     break;
                 }
                     // TODO: handle if it isn't one of these? Set trap maybe?
@@ -403,51 +403,183 @@ void AVX512Backend::run() {
     printf("\n");
 }
 
-static void AVX512Backend::emitInstruction(const Instruction& instruction) {
-    using namespace asmjit;
+void AVX512Backend::emitInstruction(const Instruction& instruction) {
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
     // TODO: Think harder about memory layout + masking :(
+    // TODO: think also about PC
+
     switch (opcode) {
         case Opcode::LUI: {
-            const auto imm = (instruction.raw >> 12) & 0x000fffff;
-            const auto avxImm = _mm512_set1_epi32(imm << 12);
-
-            assembler.vmovdqa32(asmjit::x86::zmm(instruction.rd()), avxImm);
+            // TODO: Right I can't use intrinsics
+            assembler.vmovdqa32(asmjit::x86::zmm(instruction.rd()), _mm512_set1_epi32(instruction.raw & 0xfffff000));
             break;
         }
         case Opcode::AUIPC: {
-            const auto imm = (instruction.raw >> 12) & 0x000fffff;
-            const auto avxImm = _mm512_set1_epi32(imm << 12);
-
-            const auto src = _mm512_add_epi32(state.pc, avxImm);
+            // TODO: Right I can't use intrinsics
+            const auto src = _mm512_add_epi32(state.pc, _mm512_set1_epi32(instruction.raw & 0xfffff000));
             const auto dst = asmjit::x86::zmm(instruction.rd());
-
             assembler.vmovdqa32(dst, src);
             break;
         }
-        case Opcode::JAL: {
+        case Opcode::JAL: { // TODO: Instrument instrument instrument
             // TODO
             break;
         }
-        case Opcode::JALR: {
+        case Opcode::JALR: { // TODO: Instrument instrument instrument
             // TODO
             break;
         }
-        case Opcode::BRANCH: {
+        case Opcode::BRANCH: { // TODO: Instrument instrument instrument
             // TODO
             break;
         }
-        case Opcode::LOAD: {
-            // TODO
-            break;
+        case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
+            const auto isSpecialImmCase = instruction.isHighestBitSet();
+
+            const auto imm = instruction.imm() | (isSpecialImmCase ? 0xfffff000 : 0);
+            const auto fn3 = instruction.funct3();
+            const auto src = asmjit::x86::zmm(instruction.rs1());
+            const auto dst = asmjit::x86::zmm(instruction.rd());
+
+            // we have to spill
+            assembler.sub(RSP, 64);
+            assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rsp), TMP_DATA_REGISTER);
+
+            assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
+            assembler.mov(RAX, reinterpret_cast<uint64_t>(laneBaseAddressOffsets.data()));
+
+            // Handle different load sizes
+            switch (fn3) {
+                case 0x0: { // LB
+                    // TODO
+                    break;
+                }
+                case 0x1: { // LH
+                    // TODO
+                    break;
+                }
+                case 0x2: { // LW
+                    for (int i = 0; i < LANE_COUNT; i += 16) {
+                        // Load the offsets for the current group of lanes into a vector register
+                        assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX, i * sizeof(uint32_t)));
+
+                        // Gather 32-bit words using the offsets in zmm31
+                        assembler.vpgatherdd(dst, asmjit::x86::dword_ptr(src, TMP_DATA_REGISTER, 4)); // TODO: masks
+                    }
+                    break;
+                }
+                case 0x3: {
+                    spdlog::error("In an unsupported load operation case: {}", fn3);
+                    break;
+                }
+                case 0x4: { // LBU
+                    // TODO
+                    break;
+                }
+                case 0x5: { // LHU
+                    // TODO
+                    break;
+                }
+                default: {
+                    spdlog::error("In an invalid load operation case: {}", fn3);
+                    break;
+                }
+            }
         }
-        case Opcode::STORE: {
-            // TODO
+        case Opcode::STORE: { // TODO: Instrument instrument instrument
+            // TODO: ok basically all of this lol yikes
+            const auto fn3   = instruction.funct3(); // i've caved. AlignConsecutiveAssignments is now on
+            const auto base  = reinterpret_cast<std::uintptr_t>(laneLocalMemory.get()) + instruction.rs1();
+            const auto data  = asmjit::x86::zmm(instruction.rs2());
+            const auto dists = reinterpret_cast<uint32_t*>(laneBaseAddressOffsets.data());
+
+            for (int i = 0; i < LANE_COUNT; i += 16) {
+                const auto mem = asmjit::x86::Mem(uint64_t, dists[i], 1); // TODO: make sure it's not 4 b/c qwords
+
+                switch (fn3) {
+                    case 0x0: { // SB
+                        // TODO
+                        for (auto i = 0; i < LANE_COUNT; i += 16) {
+                            // TODO: Probably want to do this smarter. Ugh
+                        }
+                        assembler.vpscatterqd(mem, data);
+                        break;
+                    }
+                    case 0x1: { // SH
+                        assembler.vpscatterqd(mem, data);
+                        break;
+                    }
+                    case 0x2: { // SW
+                        assembler.vpscatterqd(mem, data);
+                        break;
+                    }
+                    default: {
+                        spdlog::error("In an invalid IMM operation case: {}", fn3);
+                    }
+                }
+            }
             break;
         }
         case Opcode::IMM: {
-            // TODO
+            const auto imm = instruction.imm();
+            const auto fn3 = instruction.funct3(); // sorry about the name I just wanted it to be aligned
+            const auto src = asmjit::x86::zmm(instruction.rs1());
+            const auto dst = asmjit::x86::zmm(instruction.rd());
+
+            switch (fn3) {
+                case 0x0: { // ADDI
+                    assembler.vpaddq(dst, src, imm);
+                    break;
+                }
+                case 0x2: { // SLTI
+                    // TODO: I have no idea what I'm doing here lol
+                    assembler.vpcmpd(TMP_MASK_REGISTER, src, _mm512_set1_epi32(imm), asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2d(dst, k);
+                    break;
+                }
+                case 0x1: { // SLLI
+                    // Shift left logical immediate
+                    uint32_t shamt = imm & 0x1F; // Shift amount (5 bits)
+                    // TODO: Right I can't use intrinsics
+                    assembler.vpsllvd(dst, src, _mm512_set1_epi32(shamt));
+                    break;
+                }
+                case 0x3: { // SLTIU
+                    // TODO: Right I can't use intrinsics
+                    assembler.vpcmpud(TMP_MASK_REGISTER, src, _mm512_set1_epi32(static_cast<uint32_t>(imm)),
+                                      asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2d(dst, TMP_MASK_REGISTER);
+                    break;
+                }
+                case 0x4: { // XORI
+                    assembler.vpxorq(dst, src, imm);
+                    break;
+                }
+                case 0x5: { // SRLI, SRAI
+                    const auto shamt = imm & 0x1F;
+                    // TODO: Right I can't use intrinsics
+                    if (instruction.isSecondHighestBitSet()) { // SRAI
+                        assembler.vpsravd(dst, src, _mm512_set1_epi32(shamt));
+                    } else { // SRLI
+                        assembler.vpsrlvd(dst, src, _mm512_set1_epi32(shamt));
+                    }
+                    break;
+                }
+                case 0x6: { // ORI
+                    assembler.vporq(dst, src, imm);
+                    break;
+                }
+                case 0x7: { // ANDI
+                    assembler.vpandq(dst, src, imm);
+                    break;
+                }
+                default: {
+                    spdlog::error("In an invalid IMM operation case: {}", fn3);
+                    break;
+                }
+            }
+
             break;
         }
         case Opcode::ARITH: {
@@ -458,6 +590,7 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
 
             switch (instruction.funct3()) {
                 case 0x00: {
+                    // TODO: not good!
                     if (fn7 == 0x00) { // ADD
                         assembler.vpaddq(dst, rs1, rs2);
                     } else if (fn7 == 0x20) { // SUB
@@ -471,13 +604,13 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
                 case 0x02: { // SLT
-                    assembler.vpcmpq(TMP_MASK, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
-                    assembler.vpmovm2q(dst, TMP_MASK);
+                    assembler.vpcmpq(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2q(dst, TMP_MASK_REGISTER);
                     break;
                 }
                 case 0x03: { // SLTU
-                    assembler.vpcmpuq(TMP_MASK, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
-                    assembler.vpmovm2q(dst, TMP_MASK);
+                    assembler.vpcmpuq(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2q(dst, TMP_MASK_REGISTER);
                     break;
                 }
                 case 0x04: { // XOR
@@ -485,9 +618,10 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
                 case 0x05: { // SRL, SRA
+                    // TODO: Not good!
                     if (fn7 == 0x00) {
                         assembler.vpsrlq(dst, rs1, rs2);
-                    } else if (fn7 == 0x20) {
+                    } else if (fn7 == 0x20) { // TODO
                         assembler.vpsraq(dst, rs1, rs2);
                     }
                     break;
@@ -500,10 +634,15 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     assembler.vpandq(dst, rs1, rs2);
                     break;
                 }
+                default: {
+                    spdlog::error("In an invalid arithmetic operation case: {}", fn7);
+                    break;
+                }
             }
             break;
         }
         case Opcode::MEMORY: {
+            spdlog::error("Syscalls are currently unsupported!");
             assembler.mfence(); // god bless ;-;
             break;
         }
@@ -520,9 +659,26 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
     // assembler.emit(); // Increment PC
 }
 
-AVX512Backend::AVX512Backend(uint8_t* memory, State state) : MachineBackend(memory, state) {
-    this->memory = memory;
-    this->program = memory + MEMORY_SIZE;
-}
+AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : MachineBackend(memory, state) {
+    this->memory          = memory;
+    this->program         = memory + MEMORY_SIZE; // Write-only!
+    this->laneLocalMemory = std::make_unique<std::uint8_t[]>(MEMORY_SIZE * LANE_COUNT);
 
-AVX512Backend::AVX512Backend() {}
+    // Each lane gets its own non-instruction memory
+    for (auto i = 0; i < LANE_COUNT; i++) {
+        static constexpr auto MAX_DISTANCE =
+                std::numeric_limits<typename decltype(laneBaseAddressOffsets)::value_type>::max();
+
+        const auto distance = std::distance(&laneLocalMemory[0], &laneLocalMemory[i]); // TODO: check order
+
+        if (distance >= MAX_DISTANCE) {
+            spdlog::error("Can't run with inputs of size {} bytes. Max is 2 GB. Behavior undefined from hereon.",
+                          laneBaseAddressOffsets[i]);
+        }
+
+        laneBaseAddressOffsets[i] = distance;
+        std::memcpy(&laneLocalMemory[i * MEMORY_SIZE], memory, MEMORY_SIZE);
+
+        // fuzz(&laneLocalMemory[i]); // TODO
+    }
+}

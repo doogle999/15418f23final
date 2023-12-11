@@ -1,11 +1,25 @@
 #pragma once
 
+#include <array>
 #include <asmjit/asmjit.h>
 #include <immintrin.h>
+#include <memory>
 
-#include "backends/MachineBackend.h"
+#include "backends/MachineBackend.hpp"
 
-constexpr auto TMP_MASK = asmjit::x86::k1;
+/*
+ * Ideas:
+ * Inserting comparisons against pc for mask registers based on a CFG.
+ *
+ * TODO: if mask registers all zero, or all one, special-case. If half-zero, try optimizing.
+ */
+
+
+constexpr auto LANE_COUNT = 32;
+constexpr auto RAX = asmjit::x86::rax;
+constexpr auto RSP = asmjit::x86::rax;
+constexpr auto TMP_MASK_REGISTER = asmjit::x86::k1;
+constexpr auto TMP_DATA_REGISTER = asmjit::x86::zmm31;
 
 struct AVX512State {
     // Program counter,
@@ -27,4 +41,6 @@ private:
     asmjit::CodeHolder code{};
     asmjit::JitRuntime runtime{};
     void emitInstruction(const Instruction& instruction);
+    std::unique_ptr<std::uint8_t[]> laneLocalMemory;
+    std::array<std::uint32_t, LANE_COUNT> laneBaseAddressOffsets{};
 };

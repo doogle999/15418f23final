@@ -38,7 +38,9 @@ struct Instruction {
     inline MachineWord funct7() const { return (raw >> 25); }
     inline MachineWord rs1() const { return (raw >> 15) & 0x1F; }
     inline MachineWord rs2() const { return (raw >> 15) & 0x1F; }
-    inline MachineWord imm() const { return static_cast<int32_t>(raw) >> 20; }
+    inline MachineWord imm() const { return static_cast<std::int32_t>(raw) >> 20; } // TODO: int or uint...
+    inline MachineWord isSecondHighestBitSet() const { return static_cast<std::uint32_t>(raw) & (1u << 30); }
+    inline MachineWord isHighestBitSet() const { return static_cast<std::uint32_t>(raw) & (1u << 31); }
 };
 
 struct State {
@@ -52,12 +54,12 @@ struct State {
 
 class MachineBackend {
 public:
-    explicit MachineBackend(uint8_t* memory, State state)
+    explicit MachineBackend(std::uint8_t* memory, State state)
         : memory(memory), program(memory + MEMORY_SIZE), state(state){};
     virtual void run() = 0;
 
 protected:
-    uint8_t* memory;
-    uint8_t* program;
+    std::uint8_t* memory;
+    std::uint8_t* program;
     State state;
 };
