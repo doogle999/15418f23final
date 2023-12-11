@@ -2,6 +2,7 @@
 
 #include "backends/AVX512Backend.hpp"
 #include "spdlog/spdlog.h"
+#include "strategies/SimpleFuzzingStrategies.hpp"
 
 void runInstruction(State& state, std::uint32_t instruction, uint8_t* memory) {
     // Step 1: Figure out instruction length
@@ -684,6 +685,6 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachin
         laneBaseAddressOffsets[i] = distance;
         std::memcpy(&laneLocalMemory[i * MEMORY_SIZE], memory, MEMORY_SIZE);
 
-        // fuzz(&laneLocalMemory[i]); // TODO
+        Strategies::MaxEverythingStrategy(&laneLocalMemory[i], MEMORY_SIZE);
     }
 }
