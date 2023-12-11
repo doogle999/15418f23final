@@ -52,9 +52,9 @@ struct State {
     MachineWord x[32]{0};
 };
 
-class MachineBackend {
+class AbstractMachineBackend {
 public:
-    explicit MachineBackend(std::uint8_t* memory, State state)
+    explicit AbstractMachineBackend(std::uint8_t* memory, State state)
         : memory(memory), program(memory + MEMORY_SIZE), state(state){};
     virtual void run() = 0;
 

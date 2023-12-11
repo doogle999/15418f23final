@@ -423,7 +423,12 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             break;
         }
         case Opcode::JAL: { // TODO: Instrument instrument instrument
-            // TODO
+            const auto imm = ((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
+                             ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000);
+
+            if (instruction.isHighestBitSet()) {
+            }
+
             break;
         }
         case Opcode::JALR: { // TODO: Instrument instrument instrument
@@ -659,7 +664,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
     // assembler.emit(); // Increment PC
 }
 
-AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : MachineBackend(memory, state) {
+AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachineBackend(memory, state) {
     this->memory          = memory;
     this->program         = memory + MEMORY_SIZE; // Write-only!
     this->laneLocalMemory = std::make_unique<std::uint8_t[]>(MEMORY_SIZE * LANE_COUNT);

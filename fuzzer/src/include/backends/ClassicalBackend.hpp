@@ -1,9 +1,9 @@
-#include "backends/MachineBackend.hpp"
+#include "backends/AbstractMachineBackend.hpp"
 
 #pragma once
 
-class ClassicalBackend : MachineBackend {
+class ClassicalBackend : AbstractMachineBackend {
 public:
-    using MachineBackend::MachineBackend;
+    using AbstractMachineBackend::AbstractMachineBackend;
     void run() override;
 };

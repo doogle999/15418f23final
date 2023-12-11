@@ -5,7 +5,7 @@
 #include <immintrin.h>
 #include <memory>
 
-#include "backends/MachineBackend.hpp"
+#include "backends/AbstractMachineBackend.hpp"
 
 /*
  * Ideas:
@@ -30,7 +30,7 @@ struct AVX512State {
     __m512i x[32]{0};
 };
 
-class AVX512Backend : MachineBackend {
+class AVX512Backend : AbstractMachineBackend {
 public:
     AVX512Backend(uint8_t* memory, State state);
     void run() override;
