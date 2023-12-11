@@ -451,21 +451,53 @@ static void AVX512Backend::emitInstruction(const Instruction& instruction) {
             break;
         }
         case Opcode::ARITH: {
-            const auto funct7 = instruction.funct7();
+            const auto fn7 = instruction.funct7(); // sorry about the name I just wanted it to be aligned
+            const auto rs1 = asmjit::x86::zmm(instruction.rs1());
+            const auto rs2 = asmjit::x86::zmm(instruction.rs2());
+            const auto dst = asmjit::x86::zmm(instruction.rd());
 
             switch (instruction.funct3()) {
                 case 0x00: {
-                    if (funct7 == 0x00) { // ADD
-                        const auto rs1 = asmjit::x86::zmm(instruction.rs1());
-                        const auto rs2 = asmjit::x86::zmm(instruction.rs2());
-                        const auto dst = asmjit::x86::zmm(instruction.rd());
+                    if (fn7 == 0x00) { // ADD
                         assembler.vpaddq(dst, rs1, rs2);
-                    } else if (funct7 == 0x20) { // SUB
-                        const auto rs1 = asmjit::x86::zmm(instruction.rs1());
-                        const auto rs2 = asmjit::x86::zmm(instruction.rs2());
-                        const auto dst = asmjit::x86::zmm(instruction.rd());
+                    } else if (fn7 == 0x20) { // SUB
                         assembler.vpsubq(dst, rs1, rs2);
                     }
+                    break;
+                }
+                case 0x01: { // SLL
+                    // TODO: only cares about lower 5 bits, sanity-check
+                    assembler.vpsllq(dst, rs1, rs2);
+                    break;
+                }
+                case 0x02: { // SLT
+                    assembler.vpcmpq(TMP_MASK, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2q(dst, TMP_MASK);
+                    break;
+                }
+                case 0x03: { // SLTU
+                    assembler.vpcmpuq(TMP_MASK, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2q(dst, TMP_MASK);
+                    break;
+                }
+                case 0x04: { // XOR
+                    assembler.vpxorq(dst, rs1, rs2);
+                    break;
+                }
+                case 0x05: { // SRL, SRA
+                    if (fn7 == 0x00) {
+                        assembler.vpsrlq(dst, rs1, rs2);
+                    } else if (fn7 == 0x20) {
+                        assembler.vpsraq(dst, rs1, rs2);
+                    }
+                    break;
+                }
+                case 0x06: { // OR
+                    assembler.vporq(dst, rs1, rs2);
+                    break;
+                }
+                case 0x07: { // AND
+                    assembler.vpandq(dst, rs1, rs2);
                     break;
                 }
             }

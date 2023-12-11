@@ -5,6 +5,8 @@
 
 #include "backends/MachineBackend.h"
 
+constexpr auto TMP_MASK = asmjit::x86::k1;
+
 struct AVX512State {
     // Program counter,
     __m512i pc{0};
