@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "backends/ClassicalBackend.h"
+#include "../include/backends/ClassicalBackend.hpp"
 
 void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
     // Step 1: Figure out instruction length
