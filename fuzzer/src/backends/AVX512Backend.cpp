@@ -474,8 +474,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // rd = pc + 4
 
             assembler.mov(EAX, imm);
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX); // tmp = imm
-            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src); // tmp = rs1 + imm
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);                              // tmp = imm
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src);                 // tmp = rs1 + imm
             assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), TMP_DATA_REGISTER); // pc = tmp = rs1 + imm
 
             // TODO: the actual jump part
@@ -633,7 +633,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             }
             break;
         }
-        case Opcode::IMM: {
+        case Opcode::IMM: { // OK
             static constexpr auto IMM_REGISTER = EAX;
 
             if (instruction.rd() == 0) {
@@ -647,11 +647,11 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             const auto src = asmjit::x86::zmm(instruction.rs1());
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
-            assembler.mov(EAX, instruction.imm());
+            assembler.mov(EAX, instruction.imm()); // TODO: Redundant
             assembler.vpbroadcastd(TMP_DATA_REGISTER, IMM_REGISTER);
 
             switch (fn3) {
-                case 0x0: { // ADDI
+                case 0x0: { // ADDI (ok?)
                     if (is0) {
                         assembler.vmovdqa32(dst, TMP_DATA_REGISTER); // TODO?
                     } else {
@@ -659,47 +659,56 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     }
                     break;
                 }
-                case 0x2: { // SLTI
+                case 0x2: { // SLTI (ok)
                     assembler.mov(EAX, imm);
                     assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
                     assembler.vpcmpd(TMP_MASK_REGISTER, src, TMP_DATA_REGISTER, asmjit::x86::VCmpImm::kLT_OQ);
                     assembler.vpmovm2d(dst, TMP_MASK_REGISTER);
                     break;
                 }
-                case 0x1: { // SLLI
+                case 0x1: { // SLLI (OK)
                     // Shift left logical immediate
                     const auto shamt = imm & 0x1F; // Shift amount (5 bits)
-                    // TODO: Right I can't use intrinsics
-                    assembler.vpsllvd(dst, src, _mm512_set1_epi32(shamt));
+                    assembler.mov(EAX, shamt);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vpsllvd(dst, src, TMP_DATA_REGISTER);
                     break;
                 }
-                case 0x3: { // SLTIU
-                    // TODO: Right I can't use intrinsics
-                    assembler.vpcmpud(TMP_MASK_REGISTER, src, _mm512_set1_epi32(static_cast<uint32_t>(imm)),
-                                      asmjit::x86::VCmpImm::kLT_OQ);
+                case 0x3: { // SLTIU (OK)
+                    assembler.mov(EAX, imm);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vpcmpud(TMP_MASK_REGISTER, src, TMP_DATA_REGISTER, asmjit::x86::VCmpImm::kLT_OQ);
                     assembler.vpmovm2d(dst, TMP_MASK_REGISTER);
                     break;
                 }
-                case 0x4: { // XORI
-                    assembler.vpxorq(dst, src, imm);
+                case 0x4: { // XORI (OK)
+                    assembler.mov(EAX, imm);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vpxorq(dst, src, TMP_DATA_REGISTER);
                     break;
                 }
-                case 0x5: { // SRLI, SRAI
+                case 0x5: { // SRLI, SRAI (OK)
                     const auto shamt = imm & 0x1F;
-                    // TODO: Right I can't use intrinsics
+                    assembler.mov(EAX, shamt);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+
                     if (instruction.isSecondHighestBitSet()) { // SRAI
-                        assembler.vpsravd(dst, src, _mm512_set1_epi32(shamt));
+                        assembler.vpsravd(dst, src, TMP_DATA_REGISTER);
                     } else { // SRLI
-                        assembler.vpsrlvd(dst, src, _mm512_set1_epi32(shamt));
+                        assembler.vpsrlvd(dst, src, TMP_DATA_REGISTER);
                     }
                     break;
                 }
-                case 0x6: { // ORI
-                    assembler.vporq(dst, src, imm);
+                case 0x6: { // ORI (ok)
+                    assembler.mov(EAX, imm);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vporq(dst, src, TMP_DATA_REGISTER);
                     break;
                 }
-                case 0x7: { // ANDI
-                    assembler.vpandq(dst, src, imm);
+                case 0x7: { // ANDI (ok)
+                    assembler.mov(EAX, imm);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vpandq(dst, src, TMP_DATA_REGISTER);
                     break;
                 }
                 default: {
