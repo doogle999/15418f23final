@@ -437,35 +437,95 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                                    asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc)));
         }
         case Opcode::JAL: { // TODO: Instrument instrument instrument
-            const auto imm = ((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
-                             ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000);
+            const auto imm = (((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
+                              ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000)) |
+                             (instruction.isHighestBitSet() ? 0xffe00000 : 0);
 
-            if (instruction.isHighestBitSet()) {
-                // TODO
-            }
+            // state.x[rd] = state.pc + 4;
+            assembler.mov(EAX, 4);
+            assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()), EAX); // = 4
+            assembler.vpaddd(); // + state.pc
+
+            // state.pc += imm
+            assembler.mov(EAX, imm);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            assembler.vpadd(); // + imm
+            // TODO: writeback
 
             break;
         }
         case Opcode::JALR: { // TODO: Instrument instrument instrument
-            // Compute the target address
+            // TODO
             const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
-            const auto dst = TMP_DATA_REGISTER;
-
-            // Load base register value into target and add immediate
-            assembler.vmovdqu64(dst, asmjit::x86::ymm(instruction.rs1())); // Move rs1 to target
-            assembler.add(dst, imm);                                       // Add immediate to target
-            assembler.and_(target, ~1);                                    // Clear the least significant bit
-
-            // Store the return address in rd
-            assembler.mov(asmjit::x86::ymm(instruction.rd()), state.pc); // Move PC to rd
-            assembler.vadd(asmjit::x86::ymm(instruction.rd()), 4);       // Add 4 (size of instruction) to rd
-
-            // Update the program counter using mask register
-            assembler.vpblendmd(state.pc, state.pc, dst,
-                                EXECUTION_CONTROL_REGISTER); // Blend target into PC based on mask
+            // std::uint32_t rs1  = (instruction >> 15) & 0x1f;
+            // std::uint32_t temp = state.pc + 4;
+            // // Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
+            // std::uint32_t imm = (instruction >> 20);
+            // if (instruction & (1u << 31)) {
+            //     imm |= 0xfffff000;
+            // }
+            // state.pc    = (state.x[rs1] + imm) & ~1;
+            // state.x[rd] = temp;
+            break;
         }
         case Opcode::BRANCH: { // TODO: Instrument instrument instrument
-            // TODO
+            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
+            std::uint32_t rs2 = (instruction >> 20) & 0x1f;
+            // The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
+            // 31 -> 12 == 19, 30 -> 10 == 20, 4 -> 4 == 0, 0 -> 11 == -11
+            // we have to sign extend again as well
+            std::uint32_t imm = ((instruction & (1u << 31)) >> 19) | ((instruction & 0x7e000000) >> 20) | (rd & 0x1e) |
+                                ((rd & 0x1) << 11);
+            if (instruction & (1u << 31)) {
+                imm |= 0xffffe000;
+            }
+            // funct3 (bits 14:12) determines which of the comparisons to do
+            switch ((instruction >> 12) & 0x7) {
+                case 0x0: // beq
+                {
+                    if (state.x[rs1] == state.x[rs2]) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                case 0x1: // bne
+                {
+                    if (state.x[rs1] != state.x[rs2]) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                case 0x4: // blt (this is signed)
+                {
+                    if (static_cast<int32_t>(state.x[rs1]) < static_cast<int32_t>(state.x[rs2])) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                case 0x5: // bge (this is signed)
+                {
+                    if (static_cast<int32_t>(state.x[rs1]) >= static_cast<int32_t>(state.x[rs2])) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                case 0x6: // bltu (this is unsigned)
+                {
+                    if (static_cast<std::uint32_t>(state.x[rs1]) < static_cast<std::uint32_t>(state.x[rs2])) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                case 0x7: // bgeu (this is unsigned)
+                {
+                    if (static_cast<std::uint32_t>(state.x[rs1]) >= static_cast<std::uint32_t>(state.x[rs2])) {
+                        state.pc += imm;
+                    }
+                    break;
+                }
+                    // TODO: handle if it isn't one of these? Set trap maybe?
+            }
+            state.pc += 4;
             break;
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
@@ -533,7 +593,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
 
             // TODO: remove sobbing emoji
             for (int i = 0; i < LANE_COUNT; i += 16) {
-                const auto mem = asmjit::x86::Mem(uint64_t, dists[i], 1); // TODO: make sure it's not 4 b/c qwords
+                const auto mem = asmjit::x86::Mem(std::uint64_t, dists[i], 1); // TODO: make sure it's not 4 b/c qwords
 
                 switch (fn3) {
                     case 0x0: { // SB
