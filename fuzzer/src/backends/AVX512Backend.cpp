@@ -436,41 +436,55 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()),
                                    asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc)));
         }
-        case Opcode::JAL: { // TODO: Instrument instrument instrument
+        case Opcode::JAL: { // TODO: Instrument instrument instrument (OK)
             const auto imm = (((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
                               ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000)) |
                              (instruction.isHighestBitSet() ? 0xffe00000 : 0);
 
-            // state.x[rd] = state.pc + 4;
-            assembler.mov(EAX, 4);
-            assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()), EAX); // = 4
-            assembler.vpaddd(); // + state.pc
+            const auto dst = asmjit::x86::zmm(instruction.rd());
 
-            // state.pc += imm
+            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+            assembler.vmovdqa(asmjit::x86::zmm(instruction.rd()), asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
             assembler.mov(EAX, imm);
             assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-            assembler.vpadd(); // + imm
-            // TODO: writeback
+            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
+            assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), dst);
+            assembler.vpsubb(dst, dst, TMP_DATA_REGISTER); // - imm = pd
+            assembler.mov(EAX, 4);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + 4
 
+            // TODO: the actual jump part
+            // Make sure not to do things incorrectly when it comes to updating pc after twice
+
+            goto resetZeroRegister;
             break;
         }
-        case Opcode::JALR: { // TODO: Instrument instrument instrument
-            // TODO
+        case Opcode::JALR: { // TODO: Instrument instrument instrument (OK)
+                             // TODO: rd = PC+4; PC = rs1 + imm
             const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
-            // std::uint32_t rs1  = (instruction >> 15) & 0x1f;
-            // std::uint32_t temp = state.pc + 4;
-            // // Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
-            // std::uint32_t imm = (instruction >> 20);
-            // if (instruction & (1u << 31)) {
-            //     imm |= 0xfffff000;
-            // }
-            // state.pc    = (state.x[rs1] + imm) & ~1;
-            // state.x[rd] = temp;
+            const auto dst = asmjit::x86::zmm(instruction.rd());
+            const auto src = asmjit::x86::zmm(instruction.rs1());
+
+            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+
+            assembler.vmovdqa(asmjit::x86::zmm(instruction.rd()), asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+            assembler.mov(EAX, 4);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // rd = pc + 4
+
+            assembler.mov(EAX, imm);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX); // tmp = imm
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src); // tmp = rs1 + imm
+            assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), TMP_DATA_REGISTER); // pc = tmp = rs1 + imm
+
+            // TODO: the actual jump part
+            goto resetZeroRegister;
             break;
         }
         case Opcode::BRANCH: { // TODO: Instrument instrument instrument
-            std::uint32_t rs1 = (instruction >> 15) & 0x1f;
-            std::uint32_t rs2 = (instruction >> 20) & 0x1f;
+            std::uint32_t rs1 = (instruction.raw >> 15) & 0x1f;
+            std::uint32_t rs2 = (instruction.raw >> 20) & 0x1f;
             // The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
             // 31 -> 12 == 19, 30 -> 10 == 20, 4 -> 4 == 0, 0 -> 11 == -11
             // we have to sign extend again as well
@@ -702,7 +716,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
             switch (instruction.funct3()) {
-                case 0x00: { // ADD, SUB (ok)
+                case 0x00: {                                   // ADD, SUB (ok)
                     if (instruction.isSecondHighestBitSet()) { // ADD
                         assembler.vpaddq(dst, rs1, rs2);
                     } else { // SUB
@@ -767,9 +781,11 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         }
     }
 
-    // Zero the zero register lol
+incrementPC:
+
+// Zero the zero register lol
+resetZeroRegister:
     assembler.vpxorq(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
-    // assembler.emit(); // Increment PC
 }
 
 AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachineBackend(memory, state) {
