@@ -653,16 +653,17 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             switch (fn3) {
                 case 0x0: { // ADDI
                     if (is0) {
-                        assembler.vmovdqa32(dst, TMP_DATA_REGISTER);
+                        assembler.vmovdqa32(dst, TMP_DATA_REGISTER); // TODO?
                     } else {
                         assembler.vpaddq(dst, src, TMP_DATA_REGISTER);
                     }
                     break;
                 }
                 case 0x2: { // SLTI
-                    // TODO: I have no idea what I'm doing here lol
-                    assembler.vpcmpd(TMP_MASK_REGISTER, src, _mm512_set1_epi32(imm), asmjit::x86::VCmpImm::kLT_OQ);
-                    assembler.vpmovm2d(dst, k);
+                    assembler.mov(EAX, imm);
+                    assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                    assembler.vpcmpd(TMP_MASK_REGISTER, src, TMP_DATA_REGISTER, asmjit::x86::VCmpImm::kLT_OQ);
+                    assembler.vpmovm2d(dst, TMP_MASK_REGISTER);
                     break;
                 }
                 case 0x1: { // SLLI
