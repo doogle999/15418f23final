@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
     const auto programSize = ftell(programFile);
     rewind(programFile);
 
-    uint8_t* memory = nullptr;
+    uint8_t* memory  = nullptr;
     uint8_t* program = nullptr;
 
     memory = static_cast<uint8_t*>(malloc(MEMORY_SIZE + programSize));

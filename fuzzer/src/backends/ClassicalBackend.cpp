@@ -72,14 +72,14 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
         case 0x67: // jalr
         {
             // This wants us to use a temporary in case the destination register and source register are the same
-            std::uint32_t rs1 = (inst >> 15) & 0x1f;
+            std::uint32_t rs1  = (inst >> 15) & 0x1f;
             std::uint32_t temp = state.pc + 4;
             // Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
             std::uint32_t imm = (inst >> 20);
             if (inst & (1u << 31)) {
                 imm |= 0xfffff000;
             }
-            state.pc = (state.x[rs1] + imm) & ~1;
+            state.pc    = (state.x[rs1] + imm) & ~1;
             state.x[rd] = temp;
             break;
         }
@@ -157,13 +157,13 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
                 case 0x0: // lb
                 {
                     uint8_t loaded = *(memory + (state.x[rs1] + imm));
-                    state.x[rd] = (loaded & (1u << 7)) ? loaded | 0xffffff00 : loaded;
+                    state.x[rd]    = (loaded & (1u << 7)) ? loaded | 0xffffff00 : loaded;
                     break;
                 }
                 case 0x1: // lh
                 {
                     uint16_t loaded = *reinterpret_cast<uint16_t*>(memory + (state.x[rs1] + imm));
-                    state.x[rd] = (loaded & (1u << 15)) ? loaded | 0xffff0000 : loaded;
+                    state.x[rd]     = (loaded & (1u << 15)) ? loaded | 0xffff0000 : loaded;
                     break;
                 }
                 case 0x2: // lw
@@ -174,13 +174,13 @@ void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
                 case 0x4: // lbu
                 {
                     uint8_t loaded = *(memory + (state.x[rs1] + imm));
-                    state.x[rd] = loaded & 0x000000ff;
+                    state.x[rd]    = loaded & 0x000000ff;
                     break;
                 }
                 case 0x5: // lhu
                 {
                     uint16_t loaded = *reinterpret_cast<uint16_t*>(memory + (state.x[rs1] + imm));
-                    state.x[rd] = loaded & 0x0000ffff;
+                    state.x[rd]     = loaded & 0x0000ffff;
                     break;
                 }
                     // TODO: handle if it isn't one of these? Set trap maybe?

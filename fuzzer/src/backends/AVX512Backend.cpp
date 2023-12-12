@@ -404,6 +404,7 @@ void AVX512Backend::run() {
     printf("\n");
 }
 
+// TODO: handle the zero registers :(
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
@@ -411,49 +412,78 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
     // TODO: think also about PC
 
     switch (opcode) {
-        case Opcode::LUI: {
-            // TODO: Right I can't use intrinsics
-            assembler.vmovdqa32(asmjit::x86::zmm(instruction.rd()), _mm512_set1_epi32(instruction.raw & 0xfffff000));
+        case Opcode::LUI: { // OK
+            assembler.mov(EAX, instruction.raw & 0xfffff000);
+            assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()), EAX);
             break;
         }
         case Opcode::AUIPC: {
-            // TODO: Right I can't use intrinsics
-            const auto src = _mm512_add_epi32(state.pc, _mm512_set1_epi32(instruction.raw & 0xfffff000));
-            const auto dst = asmjit::x86::zmm(instruction.rd());
-            assembler.vmovdqa32(dst, src);
-            break;
+            assembler.mov(EAX, instruction.raw & 0xfffff);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            assembler.vpaddd(state.pc, TMP_DATA_REGISTER);
+
+            // yeah yeah I know
+            for (auto i = 0; i < LANE_COUNT; i++) {
+                auto tmp = TMP_SCALAR_REGISTER;
+                assembler.mov(tmp,
+                              asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc) + i * sizeof(uint32_t)));
+                assembler.add(tmp, EAX);
+                // Store the result back into the state.pc array
+                assembler.mov(asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc) + i * sizeof(uint32_t)),
+                              tmp);
+            }
+
+            assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()),
+                                   asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc)));
         }
         case Opcode::JAL: { // TODO: Instrument instrument instrument
             const auto imm = ((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
                              ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000);
 
             if (instruction.isHighestBitSet()) {
+                // TODO
             }
 
             break;
         }
         case Opcode::JALR: { // TODO: Instrument instrument instrument
-            // TODO
-            break;
+            // Compute the target address
+            const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
+            const auto dst = TMP_DATA_REGISTER;
+
+            // Load base register value into target and add immediate
+            assembler.vmovdqu64(dst, asmjit::x86::ymm(instruction.rs1())); // Move rs1 to target
+            assembler.add(dst, imm);                                       // Add immediate to target
+            assembler.and_(target, ~1);                                    // Clear the least significant bit
+
+            // Store the return address in rd
+            assembler.mov(asmjit::x86::ymm(instruction.rd()), state.pc); // Move PC to rd
+            assembler.vadd(asmjit::x86::ymm(instruction.rd()), 4);       // Add 4 (size of instruction) to rd
+
+            // Update the program counter using mask register
+            assembler.vpblendmd(state.pc, state.pc, dst,
+                                EXECUTION_CONTROL_REGISTER); // Blend target into PC based on mask
         }
         case Opcode::BRANCH: { // TODO: Instrument instrument instrument
             // TODO
             break;
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
+
+            const auto imm              = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
+            const auto fn3              = instruction.funct3();
             const auto isSpecialImmCase = instruction.isHighestBitSet();
 
-            const auto imm = instruction.imm() | (isSpecialImmCase ? 0xfffff000 : 0);
-            const auto fn3 = instruction.funct3();
             const auto src = asmjit::x86::zmm(instruction.rs1());
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
             // we have to spill
+            // TODO: Should probably be EAX, not RAX. (TODO: fixed but check for bugs)
             assembler.sub(RSP, 64);
             assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rsp), TMP_DATA_REGISTER);
 
-            assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
-            assembler.mov(RAX, reinterpret_cast<uint64_t>(laneBaseAddressOffsets.data()));
+            assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX));
+            assembler.mov(EAX, reinterpret_cast<uint64_t>(laneBaseAddressOffsets.data()));
 
             // Handle different load sizes
             switch (fn3) {
@@ -466,9 +496,10 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
                 case 0x2: { // LW
+                    // TODO: Can remove lol
                     for (int i = 0; i < LANE_COUNT; i += 16) {
                         // Load the offsets for the current group of lanes into a vector register
-                        assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX, i * sizeof(uint32_t)));
+                        assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX, i * sizeof(uint32_t)));
 
                         // Gather 32-bit words using the offsets in zmm31
                         assembler.vpgatherdd(dst, asmjit::x86::dword_ptr(src, TMP_DATA_REGISTER, 4)); // TODO: masks
@@ -500,6 +531,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             const auto data  = asmjit::x86::zmm(instruction.rs2());
             const auto dists = reinterpret_cast<uint32_t*>(laneBaseAddressOffsets.data());
 
+            // TODO: remove sobbing emoji
             for (int i = 0; i < LANE_COUNT; i += 16) {
                 const auto mem = asmjit::x86::Mem(uint64_t, dists[i], 1); // TODO: make sure it's not 4 b/c qwords
 
@@ -528,14 +560,29 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             break;
         }
         case Opcode::IMM: {
+            static constexpr auto IMM_REGISTER = EAX;
+
+            if (instruction.rd() == 0) {
+                spdlog::debug("Skipping over IMM write to zero register.");
+                return;
+            }
+
+            const auto is0 = instruction.rs1() == 0;
             const auto imm = instruction.imm();
             const auto fn3 = instruction.funct3(); // sorry about the name I just wanted it to be aligned
             const auto src = asmjit::x86::zmm(instruction.rs1());
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
+            assembler.mov(EAX, instruction.imm());
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, IMM_REGISTER);
+
             switch (fn3) {
                 case 0x0: { // ADDI
-                    assembler.vpaddq(dst, src, imm);
+                    if (is0) {
+                        assembler.vmovdqa32(dst, TMP_DATA_REGISTER);
+                    } else {
+                        assembler.vpaddq(dst, src, TMP_DATA_REGISTER);
+                    }
                     break;
                 }
                 case 0x2: { // SLTI
@@ -546,7 +593,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                 }
                 case 0x1: { // SLLI
                     // Shift left logical immediate
-                    uint32_t shamt = imm & 0x1F; // Shift amount (5 bits)
+                    const auto shamt = imm & 0x1F; // Shift amount (5 bits)
                     // TODO: Right I can't use intrinsics
                     assembler.vpsllvd(dst, src, _mm512_set1_epi32(shamt));
                     break;
@@ -647,21 +694,22 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             }
             break;
         }
-        case Opcode::MEMORY: {
-            spdlog::error("Syscalls are currently unsupported!");
+        case Opcode::MEMORY: {  // OK
             assembler.mfence(); // god bless ;-;
             break;
         }
-        case Opcode::SYSCALL: {
+        case Opcode::SYSCALL: { // OK
             spdlog::error("Syscalls are currently unsupported!");
             break;
         }
-        default: {
+        default: { // OK
             spdlog::error("Invalid instruction: 0x{:08x}", instruction.raw);
             break;
         }
     }
 
+    // Zero the zero register lol
+    assembler.vpxorq(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
     // assembler.emit(); // Increment PC
 }
 
@@ -685,6 +733,26 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachin
         laneBaseAddressOffsets[i] = distance;
         std::memcpy(&laneLocalMemory[i * MEMORY_SIZE], memory, MEMORY_SIZE);
 
-        Strategies::MaxEverythingStrategy(&laneLocalMemory[i], MEMORY_SIZE);
+        FuzzingStrategies::MaxEverythingStrategy(&laneLocalMemory[i], MEMORY_SIZE);
+    }
+}
+
+void AVX512Backend::createBranchLabels(const std::vector<Instruction>& instructions) {
+    for (auto i = 0ull; i < instructions.size(); ++i) {
+        const auto& instruction = instructions.at(i);
+
+        if (0x70D0) {                           // TODO
+            std::size_t targetIndex   = 0x70D0; // TODO
+            std::size_t notTakenIndex = i + 1;  // TODO: use +4 if going to memory-based & still needed
+
+            // Create labels
+            auto targetLabel   = assembler.newLabel();
+            auto notTakenLabel = assembler.newLabel();
+
+            instructionIdToLabelsMap[instruction.uniqueId] = {targetLabel, notTakenLabel};
+
+            instructionIdToLabelsMap[targetIndex].push_back(targetLabel);
+            instructionIdToLabelsMap[notTakenIndex].push_back(notTakenLabel);
+        }
     }
 }

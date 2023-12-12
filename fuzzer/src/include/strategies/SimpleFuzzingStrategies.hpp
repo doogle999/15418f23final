@@ -4,7 +4,7 @@
 #include <limits>
 #include <type_traits>
 
-namespace Strategies {
+namespace FuzzingStrategies {
     AbstractFuzzingStrategy MinEverythingStrategy = [](std::uint8_t* memory, std::size_t memorySize) {
         constexpr auto MIN_VALUE = std::numeric_limits<std::remove_pointer_t<decltype(memory)>>::min();
         static_assert(MIN_VALUE == 0x00);
