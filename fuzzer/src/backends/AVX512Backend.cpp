@@ -702,26 +702,26 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
             switch (instruction.funct3()) {
-                case 0x00: {
-                    // TODO: not good!
-                    if (fn7 == 0x00) { // ADD
+                case 0x00: { // ADD, SUB (ok)
+                    if (instruction.isSecondHighestBitSet()) { // ADD
                         assembler.vpaddq(dst, rs1, rs2);
-                    } else if (fn7 == 0x20) { // SUB
+                    } else { // SUB
                         assembler.vpsubq(dst, rs1, rs2);
                     }
                     break;
                 }
                 case 0x01: { // SLL
-                    // TODO: only cares about lower 5 bits, sanity-check
+                    // TODO: SLL only cares about lower 5 bits. Should sanity-check this.
+                    // As far as I can understand, vpsllq behaves correctly in this case.
                     assembler.vpsllq(dst, rs1, rs2);
                     break;
                 }
-                case 0x02: { // SLT
+                case 0x02: { // SLT (OK)
                     assembler.vpcmpq(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
                     assembler.vpmovm2q(dst, TMP_MASK_REGISTER);
                     break;
                 }
-                case 0x03: { // SLTU
+                case 0x03: { // SLTU (OK)
                     assembler.vpcmpuq(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
                     assembler.vpmovm2q(dst, TMP_MASK_REGISTER);
                     break;
@@ -731,23 +731,22 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
                 case 0x05: { // SRL, SRA
-                    // TODO: Not good!
-                    if (fn7 == 0x00) {
+                    if (instruction.isSecondHighestBitSet()) {
                         assembler.vpsrlq(dst, rs1, rs2);
-                    } else if (fn7 == 0x20) { // TODO
+                    } else {
                         assembler.vpsraq(dst, rs1, rs2);
                     }
                     break;
                 }
-                case 0x06: { // OR
+                case 0x06: { // OR (OK)
                     assembler.vporq(dst, rs1, rs2);
                     break;
                 }
-                case 0x07: { // AND
+                case 0x07: { // AND (OK)
                     assembler.vpandq(dst, rs1, rs2);
                     break;
                 }
-                default: {
+                default: { // OK
                     spdlog::error("In an invalid arithmetic operation case: {}", fn7);
                     break;
                 }

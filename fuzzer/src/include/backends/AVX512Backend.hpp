@@ -35,7 +35,7 @@ struct AVX512State {
     // x[0] is just constant 0, and so we have 31 general purpose registers
     __m512i x[32]{0};
     std::size_t totalNumJumps{};
-    std::size_t totalJumpsSeen{};
+    std::size_t totalJumpfsSeen{};
     std::size_t totalJumpsTaken{};
 };
 
