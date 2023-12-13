@@ -417,26 +417,26 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()), EAX);
             break;
         }
-        case Opcode::AUIPC: {
-            assembler.mov(EAX, instruction.raw & 0xfffff);
+        case Opcode::AUIPC: { // OK
+            const auto dst = asmjit::x86::zmm(instruction.rd());
+
+            // tmp = &pc
+            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+
+            // dst = *tmp = pc
+            assembler.vmovdqa(dst, asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+
+            // eax = imm
+            assembler.mov(EAX, instruction.raw & 0xfffff000);
+
+            // tmp = eax = imm
             assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-            assembler.vpaddd(state.pc, TMP_DATA_REGISTER);
 
-            // yeah yeah I know
-            for (auto i = 0; i < LANE_COUNT; i++) {
-                auto tmp = TMP_SCALAR_REGISTER;
-                assembler.mov(tmp,
-                              asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc) + i * sizeof(uint32_t)));
-                assembler.add(tmp, EAX);
-                // Store the result back into the state.pc array
-                assembler.mov(asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc) + i * sizeof(uint32_t)),
-                              tmp);
-            }
-
-            assembler.vpbroadcastd(asmjit::x86::zmm(instruction.rd()),
-                                   asmjit::x86::dword_ptr(reinterpret_cast<asmjit::Imm>(state.pc)));
+            // dst = dst + tmp = pc + imm
+            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER);
+            break;
         }
-        case Opcode::JAL: { // TODO: Instrument instrument instrument (OK)
+        case Opcode::JAL: { // TODO: Instrument instrument instrument (OK...ish)
             const auto imm = (((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
                               ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000)) |
                              (instruction.isHighestBitSet() ? 0xffe00000 : 0);
@@ -460,7 +460,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             goto resetZeroRegister;
             break;
         }
-        case Opcode::JALR: { // TODO: Instrument instrument instrument (OK)
+        case Opcode::JALR: { // TODO: Instrument instrument instrument (OK...ish)
                              // TODO: rd = PC+4; PC = rs1 + imm
             const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
             const auto dst = asmjit::x86::zmm(instruction.rd());
@@ -719,7 +719,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
 
             break;
         }
-        case Opcode::ARITH: {
+        case Opcode::ARITH: {                      // OK
             const auto fn7 = instruction.funct7(); // sorry about the name I just wanted it to be aligned
             const auto rs1 = asmjit::x86::zmm(instruction.rs1());
             const auto rs2 = asmjit::x86::zmm(instruction.rs2());
