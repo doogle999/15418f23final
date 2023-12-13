@@ -2,6 +2,8 @@
 
 #include <array>
 #include <asmjit/asmjit.h>
+#include <asmjit/core.h>
+#include <asmjit/x86.h>
 #include <immintrin.h>
 #include <memory>
 #include <unordered_map>
@@ -48,6 +50,7 @@ private:
     void createBranchLabels(const std::vector<Instruction>& instructions);
 
     std::unordered_map<std::size_t, std::vector<asmjit::Label>> instructionIdToLabelsMap;
+    std::vector<asmjit::Label> labels;
     asmjit::x86::Assembler assembler{};
     AVX512State state{}; // TODO: init properly :(
     asmjit::CodeHolder code{};

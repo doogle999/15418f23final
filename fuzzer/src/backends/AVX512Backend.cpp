@@ -404,11 +404,13 @@ void AVX512Backend::run() {
     printf("\n");
 }
 
-// TODO: handle the zero registers :(
-thread_local uint8_t scratch128b[LANE_COUNT]{};
-thread_local uint8_t scratch512b[LANE_COUNT]{};
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
+    thread_local uint8_t scratch128b[LANE_COUNT]{};
+    thread_local uint8_t scratch512b[LANE_COUNT]{};
+    thread_local std::int64_t instructionNumber{-1};
     const auto opcode = static_cast<Opcode>(instruction.opcode());
+
+    instructionNumber++;
 
     // TODO: Think harder about memory layout + masking :(
     // TODO: think also about PC
@@ -485,63 +487,74 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             break;
         }
         case Opcode::BRANCH: { // TODO: Instrument instrument instrument
-            std::uint32_t rs1 = (instruction.raw >> 15) & 0x1f;
-            std::uint32_t rs2 = (instruction.raw >> 20) & 0x1f;
+            const auto fn3 = instruction.funct3();
+            const auto rs1 = asmjit::x86::zmm(instruction.rs1());
+            const auto rs2 = asmjit::x86::zmm(instruction.rs2());
+            const auto rd  = instruction.rd();
+
+            // AJAX:
             // The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
             // 31 -> 12 == 19, 30 -> 10 == 20, 4 -> 4 == 0, 0 -> 11 == -11
             // we have to sign extend again as well
-            std::uint32_t imm = ((instruction & (1u << 31)) >> 19) | ((instruction & 0x7e000000) >> 20) | (rd & 0x1e) |
-                                ((rd & 0x1) << 11);
-            if (instruction & (1u << 31)) {
-                imm |= 0xffffe000;
-            }
+
+            const auto imm = (((instruction.raw & (1u << 31)) >> 19) | ((instruction.raw & 0x7e000000) >> 20) |
+                              (rd & 0x1e) | ((rd & 0x1) << 11)) |
+                             (instruction.isHighestBitSet() ? 0xffffe000 : 0);
+
             // funct3 (bits 14:12) determines which of the comparisons to do
-            switch ((instruction >> 12) & 0x7) {
-                case 0x0: // beq
-                {
-                    if (state.x[rs1] == state.x[rs2]) {
-                        state.pc += imm;
-                    }
+            switch (fn3) {
+                case 0x0: { // BEQ
+                    assembler.vpcmpd(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kEQ_OQ);
                     break;
                 }
-                case 0x1: // bne
-                {
-                    if (state.x[rs1] != state.x[rs2]) {
-                        state.pc += imm;
-                    }
+                case 0x1: { // BNE
+                    assembler.vpcmpd(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kNEQ_OQ);
                     break;
                 }
-                case 0x4: // blt (this is signed)
-                {
-                    if (static_cast<int32_t>(state.x[rs1]) < static_cast<int32_t>(state.x[rs2])) {
-                        state.pc += imm;
-                    }
+                case 0x4: { // BLT (this is signed)
+                    assembler.vpcmpd(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
                     break;
                 }
-                case 0x5: // bge (this is signed)
-                {
-                    if (static_cast<int32_t>(state.x[rs1]) >= static_cast<int32_t>(state.x[rs2])) {
-                        state.pc += imm;
-                    }
+                case 0x5: { // BGE (this is signed)
+                    assembler.vpcmpd(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kGE_OQ);
                     break;
                 }
-                case 0x6: // bltu (this is unsigned)
-                {
-                    if (static_cast<std::uint32_t>(state.x[rs1]) < static_cast<std::uint32_t>(state.x[rs2])) {
-                        state.pc += imm;
-                    }
+                case 0x6: { // BLTU (this is unsigned)
+                    assembler.vpcmpud(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kLT_OQ);
                     break;
                 }
-                case 0x7: // bgeu (this is unsigned)
-                {
-                    if (static_cast<std::uint32_t>(state.x[rs1]) >= static_cast<std::uint32_t>(state.x[rs2])) {
-                        state.pc += imm;
-                    }
+                case 0x7: { // bgeu (this is unsigned)
+                    assembler.vpcmpud(TMP_MASK_REGISTER, rs1, rs2, asmjit::x86::VCmpImm::kGE_OQ);
                     break;
                 }
-                    // TODO: handle if it isn't one of these? Set trap maybe?
+                default: {
+                    spdlog::error("In an invalid branch operation case: {}", fn3);
+                    break;
+                }
             }
-            state.pc += 4;
+
+
+            // backup zmm1 (spill)
+            assembler.mov(RAX, &scratch512b);
+            assembler.vmovdqu64(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
+
+            // overwrite zmm1 w/pc
+            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+            assembler.vmovdqa32(asmjit::x86::zmm1, asmjit::x86::ptr(TMP_SCALAR_REGISTER));
+
+            // load imm, broadcast
+            assembler.mov(TMP_SCALAR_REGISTER, imm);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, TMP_SCALAR_REGISTER);
+
+            // compute new pcs
+            assembler.vpaddd(asmjit::x86::zmm1, asmjit::x86::zmm1, TMP_DATA_REGISTER);
+
+            // update pc
+            assembler.mov(RAX, &state.pc);
+            assembler.k(TMP_MASK_REGISTER).vmovdqa32(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
+
+            // restore from spill
+            assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b)));
             break;
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
@@ -654,20 +667,11 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
                 case 0x2: { // SW
-
                     // M[rs1+imm][0:31] = rs2[0:31]
-                    // TODO: Still wrong for sure
-                    // Copy offets into TMP_DATA_REGISTER
-
-                    if (imm > INT_MAX) {
-                        spdlog::error("SIMD fastpath bug: IMM > INT_MAX.");
-                    }
-
                     // TODO: please god let this be right
                     assembler.vpscatterdd(
                             asmjit::x86::zmmword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0, static_cast<int>(imm)),
                             rs2);
-
                     break;
                 }
                 default: {
@@ -836,7 +840,6 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
     }
 
 incrementPC:
-
 // Zero the zero register lol
 resetZeroRegister:
     assembler.vpxorq(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
@@ -869,6 +872,7 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachin
 
 void AVX512Backend::createBranchLabels(const std::vector<Instruction>& instructions) {
     for (auto i = 0ull; i < instructions.size(); ++i) {
+        labels.push_back(assembler.newLabel());
         const auto& instruction = instructions.at(i);
 
         if (0x70D0) {                           // TODO
