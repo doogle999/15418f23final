@@ -55,4 +55,5 @@ private:
     void emitInstruction(const Instruction& instruction);
     std::unique_ptr<std::uint8_t[]> laneLocalMemory;
     std::array<std::uint32_t, LANE_COUNT> laneBaseAddressOffsets{};
+    std::array<std::uint32_t, LANE_COUNT> laneBaseAddresses{};
 };

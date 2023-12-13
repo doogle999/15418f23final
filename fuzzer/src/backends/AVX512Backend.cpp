@@ -405,6 +405,8 @@ void AVX512Backend::run() {
 }
 
 // TODO: handle the zero registers :(
+thread_local uint8_t scratch128b[LANE_COUNT]{};
+thread_local uint8_t scratch512b[LANE_COUNT]{};
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
@@ -544,53 +546,68 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
 
-            const auto imm              = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
-            const auto fn3              = instruction.funct3();
-            const auto isSpecialImmCase = instruction.isHighestBitSet();
-
-            const auto src = asmjit::x86::zmm(instruction.rs1());
+            const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
+            const auto fn3 = instruction.funct3();
+            const auto rs1 = asmjit::x86::zmm(instruction.rs1());
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
             // we have to spill
             // TODO: Should probably be EAX, not RAX. (TODO: fixed but check for bugs)
-            assembler.sub(RSP, 64);
-            assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rsp), TMP_DATA_REGISTER);
+            // assembler.sub(RSP, 64);
+            // assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rsp), TMP_DATA_REGISTER);
+            //
+            // assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX));
+            // assembler.mov(EAX, reinterpret_cast<uint64_t>(laneBaseAddressOffsets.data()));
 
-            assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX));
-            assembler.mov(EAX, reinterpret_cast<uint64_t>(laneBaseAddressOffsets.data()));
+            // assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            // TMP_DATA_REGISTER = rs1 + imm
+            // assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
 
-            // Handle different load sizes
+            // TMP_DATA_REGISTER = rs1 + offsets
+            assembler.mov(RAX, laneBaseAddressOffsets.data());
+            assembler.vmovdqu64(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
+            // Read base
+            assembler.mov(TMP_SCALAR_REGISTER, laneLocalMemory.get());
+
+            if (imm > INT_MAX) {
+                spdlog::error("SIMD fastpath bug: IMM > INT_MAX in load.");
+            }
+
+            assembler.vpgatherdd(
+                    dst, asmjit::x86::zmmword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0, static_cast<int>(imm)));
+
             switch (fn3) {
                 case 0x0: { // LB
-                    // TODO
+                    assembler.vpmovdb(dst, dst);
+                    assembler.vpmovsxbq(dst, dst);
                     break;
                 }
                 case 0x1: { // LH
-                    // TODO
+                    assembler.vpmovdw(dst, dst);
+                    assembler.vpmovsxwd(dst, dst);
                     break;
                 }
                 case 0x2: { // LW
-                    // TODO: Can remove lol
-                    for (int i = 0; i < LANE_COUNT; i += 16) {
-                        // Load the offsets for the current group of lanes into a vector register
-                        // assembler.mov(RAX< )
-                        assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX, i * sizeof(uint32_t)));
-
-                        // Gather 32-bit words using the offsets in zmm31
-                        assembler.vpgatherdd(dst, asmjit::x86::dword_ptr(src, TMP_DATA_REGISTER, 4)); // TODO: masks
-                    }
+                    // rd = M[rs1+imm][0:31]
+                    // TODO: please god let this be right
+                    /* Code here was hoisted up */
                     break;
                 }
-                case 0x3: {
-                    spdlog::error("In an unsupported load operation case: {}", fn3);
+                case 0x3: { // NA
+                    spdlog::error("In an unsupported load operation: {}", fn3);
                     break;
                 }
                 case 0x4: { // LBU
-                    // TODO
+                    assembler.mov(RAX, 0xFF);
+                    assembler.vpbroadcastb(TMP_DATA_REGISTER, RAX);
+                    assembler.vpandd(dst, dst, TMP_DATA_REGISTER);
                     break;
                 }
                 case 0x5: { // LHU
-                    // TODO
+                    assembler.mov(RAX, 0xFFFF);
+                    assembler.vpbroadcastb(TMP_DATA_REGISTER, RAX);
+                    assembler.vpandd(dst, dst, TMP_DATA_REGISTER);
                     break;
                 }
                 default: {
@@ -603,27 +620,54 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             // TODO: ok basically all of this lol yikes
             const auto fn3 = instruction.funct3(); // i've caved. AlignConsecutiveAssignments is now on
             const auto rs1 = asmjit::x86::zmm(instruction.rs1());
-            const auto src = asmjit::x86::zmm(instruction.rs2());
+            const auto rs2 = asmjit::x86::zmm(instruction.rs2());
             const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
 
-            assembler.mov(EAX, imm);
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
+            // assembler.mov(EAX, imm);
+            // assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            // assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
+            // TMP_DATA_REGISTER = rs1 + imm
 
-            // TMP_DATA_REGISTER now stores exactly what it needs to store
+            // TMP_DATA_REGISTER = rs1 + offsets
+            assembler.mov(RAX, laneBaseAddressOffsets.data());
+            assembler.vmovdqu64(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
+            // Read base
+            assembler.mov(TMP_SCALAR_REGISTER, laneLocalMemory.get());
+
+            if (imm > INT_MAX) {
+                spdlog::error("SIMD fastpath bug: IMM > INT_MAX in store.");
+            }
 
             switch (fn3) {
                 case 0x0: { // SB
+                    // Annoying blend
+                    // assembler.mov(RAX, &scratchLaneChars); // remove & probably
+                    // assembler.vpmovdb(asmjit::x86::ptr(RAX), rs2);
+                    // TODO: Biggest remaining key instruction here
                     spdlog::error("In unsupported STORE case: SB.");
                     break;
                 }
                 case 0x1: { // SH
+                    // Annoying blend
                     spdlog::error("In unsupported STORE case: SH.");
                     break;
                 }
                 case 0x2: { // SW
-                    assembler.mov(RAX, laneBaseAddressOffsets.data());
-                    assembler.vmovdqu64(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
+
+                    // M[rs1+imm][0:31] = rs2[0:31]
+                    // TODO: Still wrong for sure
+                    // Copy offets into TMP_DATA_REGISTER
+
+                    if (imm > INT_MAX) {
+                        spdlog::error("SIMD fastpath bug: IMM > INT_MAX.");
+                    }
+
+                    // TODO: please god let this be right
+                    assembler.vpscatterdd(
+                            asmjit::x86::zmmword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0, static_cast<int>(imm)),
+                            rs2);
+
                     break;
                 }
                 default: {
@@ -816,6 +860,7 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state) : AbstractMachin
         }
 
         laneBaseAddressOffsets[i] = distance;
+        laneBaseAddresses         = &laneLocalMemory[i];
         std::memcpy(&laneLocalMemory[i * MEMORY_SIZE], memory, MEMORY_SIZE);
 
         FuzzingStrategies::MaxEverythingStrategy(&laneLocalMemory[i], MEMORY_SIZE);
