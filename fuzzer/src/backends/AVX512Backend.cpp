@@ -573,6 +573,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     // TODO: Can remove lol
                     for (int i = 0; i < LANE_COUNT; i += 16) {
                         // Load the offsets for the current group of lanes into a vector register
+                        // assembler.mov(RAX< )
                         assembler.vmovdqu32(TMP_DATA_REGISTER, asmjit::x86::ptr(EAX, i * sizeof(uint32_t)));
 
                         // Gather 32-bit words using the offsets in zmm31
@@ -600,37 +601,36 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         }
         case Opcode::STORE: { // TODO: Instrument instrument instrument
             // TODO: ok basically all of this lol yikes
-            const auto fn3   = instruction.funct3(); // i've caved. AlignConsecutiveAssignments is now on
-            const auto base  = reinterpret_cast<std::uintptr_t>(laneLocalMemory.get()) + instruction.rs1();
-            const auto data  = asmjit::x86::zmm(instruction.rs2());
-            const auto dists = reinterpret_cast<uint32_t*>(laneBaseAddressOffsets.data());
+            const auto fn3 = instruction.funct3(); // i've caved. AlignConsecutiveAssignments is now on
+            const auto rs1 = asmjit::x86::zmm(instruction.rs1());
+            const auto src = asmjit::x86::zmm(instruction.rs2());
+            const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
 
-            // TODO: remove sobbing emoji
-            for (int i = 0; i < LANE_COUNT; i += 16) {
-                const auto mem = asmjit::x86::Mem(std::uint64_t, dists[i], 1); // TODO: make sure it's not 4 b/c qwords
+            assembler.mov(EAX, imm);
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, rs1);
 
-                switch (fn3) {
-                    case 0x0: { // SB
-                        // TODO
-                        for (auto i = 0; i < LANE_COUNT; i += 16) {
-                            // TODO: Probably want to do this smarter. Ugh
-                        }
-                        assembler.vpscatterqd(mem, data);
-                        break;
-                    }
-                    case 0x1: { // SH
-                        assembler.vpscatterqd(mem, data);
-                        break;
-                    }
-                    case 0x2: { // SW
-                        assembler.vpscatterqd(mem, data);
-                        break;
-                    }
-                    default: {
-                        spdlog::error("In an invalid IMM operation case: {}", fn3);
-                    }
+            // TMP_DATA_REGISTER now stores exactly what it needs to store
+
+            switch (fn3) {
+                case 0x0: { // SB
+                    spdlog::error("In unsupported STORE case: SB.");
+                    break;
+                }
+                case 0x1: { // SH
+                    spdlog::error("In unsupported STORE case: SH.");
+                    break;
+                }
+                case 0x2: { // SW
+                    assembler.mov(RAX, laneBaseAddressOffsets.data());
+                    assembler.vmovdqu64(TMP_DATA_REGISTER, asmjit::x86::ptr(RAX));
+                    break;
+                }
+                default: {
+                    spdlog::error("In an invalid STORE operation case: {}", fn3);
                 }
             }
+
             break;
         }
         case Opcode::IMM: { // OK
