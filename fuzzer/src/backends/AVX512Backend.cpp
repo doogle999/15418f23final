@@ -405,8 +405,9 @@ void AVX512Backend::run() {
 }
 
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
-    thread_local uint8_t scratch128b[LANE_COUNT]{};
-    thread_local uint8_t scratch512b[LANE_COUNT]{};
+    thread_local uint8_t scratch512b1[LANE_COUNT]{};
+    thread_local uint8_t scratch512b2[LANE_COUNT]{};
+    thread_local uint8_t scratch512b3[LANE_COUNT]{};
     thread_local std::int64_t instructionNumber{-1};
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
@@ -482,6 +483,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src);                 // tmp = rs1 + imm
             assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), TMP_DATA_REGISTER); // pc = tmp = rs1 + imm
 
+            // TODO: Not sure how important the &1 ends up being...
             // TODO: the actual jump part
             goto resetZeroRegister;
             break;
@@ -533,9 +535,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                 }
             }
 
-
             // backup zmm1 (spill)
-            assembler.mov(RAX, &scratch512b);
+            assembler.mov(RAX, &scratch512b1);
             assembler.vmovdqu64(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
 
             // overwrite zmm1 w/pc
@@ -554,7 +555,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.k(TMP_MASK_REGISTER).vmovdqa32(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
 
             // restore from spill
-            assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b)));
+            assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)));
             break;
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
@@ -583,8 +584,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             // Read base
             assembler.mov(TMP_SCALAR_REGISTER, laneLocalMemory.get());
 
-            if (imm > INT_MAX) {
-                spdlog::error("SIMD fastpath bug: IMM > INT_MAX in load.");
+            if (imm >= INT_MAX) {
+                spdlog::error("SIMD fastpath bug: IMM >= INT_MAX in load.");
             }
 
             assembler.vpgatherdd(
@@ -648,27 +649,72 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             // Read base
             assembler.mov(TMP_SCALAR_REGISTER, laneLocalMemory.get());
 
-            if (imm > INT_MAX) {
-                spdlog::error("SIMD fastpath bug: IMM > INT_MAX in store.");
+            if (imm >= INT_MAX) {
+                spdlog::error("SIMD fastpath bug: IMM >= INT_MAX in store.");
             }
 
             switch (fn3) {
                 case 0x0: { // SB
-                    // Annoying blend
-                    // assembler.mov(RAX, &scratchLaneChars); // remove & probably
-                    // assembler.vpmovdb(asmjit::x86::ptr(RAX), rs2);
-                    // TODO: Biggest remaining key instruction here
-                    spdlog::error("In unsupported STORE case: SB.");
+                    // i wonder if this actually works
+                    assembler.vmovdqu64(asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)), asmjit::x86::zmm1);
+                    assembler.vmovdqu64(asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b2)), asmjit::x86::zmm2);
+
+                    assembler.vgatherdps(asmjit::x86::zmm1,
+                                         asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0));
+
+                    assembler.vpmovdb(asmjit::x86::xmm2, rs2); // Move the lowest bytes of each dword in rs2 to xmm2
+
+                    // Prepare a mask for blending
+                    std::size_t mask{};
+                    for (int i = 0; i < LANE_COUNT; i++) {
+                        mask <<= 8;
+                        mask += 0b1;
+                    }
+
+                    assembler.mov(RAX, mask);
+                    assembler.kmovq(TMP_MASK_REGISTER, RAX);
+
+                    assembler.k(TMP_MASK_REGISTER).vpblendmb(asmjit::x86::zmm1, asmjit::x86::zmm1, asmjit::x86::zmm2);
+
+                    assembler.vscatterdps(asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0),
+                                          asmjit::x86::zmm1);
+
+                    assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)));
+                    assembler.vmovdqu64(asmjit::x86::zmm2, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b2)));
+
                     break;
                 }
                 case 0x1: { // SH
-                    // Annoying blend
-                    spdlog::error("In unsupported STORE case: SH.");
+                    // i wonder if this actually works
+                    assembler.vmovdqu64(asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)), asmjit::x86::zmm1);
+                    assembler.vmovdqu64(asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b2)), asmjit::x86::zmm2);
+
+                    assembler.vgatherdps(asmjit::x86::zmm1,
+                                         asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0));
+
+                    assembler.vpmovdb(asmjit::x86::xmm2, rs2); // Move the lowest bytes of each dword in rs2 to xmm2
+
+                    std::size_t mask{};
+                    for (int i = 0; i < LANE_COUNT; i++) {
+                        mask <<= 8;
+                        mask += 0b11;
+                    }
+
+                    assembler.mov(RAX, mask);
+                    assembler.kmovq(TMP_MASK_REGISTER, RAX);
+
+                    assembler.k(TMP_MASK_REGISTER).vpblendmb(asmjit::x86::zmm1, asmjit::x86::zmm1, asmjit::x86::zmm2);
+
+                    assembler.vscatterdps(asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0),
+                                          asmjit::x86::zmm1);
+
+                    assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)));
+                    assembler.vmovdqu64(asmjit::x86::zmm2, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b2)));
+
                     break;
                 }
                 case 0x2: { // SW
                     // M[rs1+imm][0:31] = rs2[0:31]
-                    // TODO: please god let this be right
                     assembler.vpscatterdd(
                             asmjit::x86::zmmword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0, static_cast<int>(imm)),
                             rs2);
@@ -714,9 +760,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     assembler.vpmovm2d(dst, TMP_MASK_REGISTER);
                     break;
                 }
-                case 0x1: { // SLLI (OK)
-                    // Shift left logical immediate
-                    const auto shamt = imm & 0x1F; // Shift amount (5 bits)
+                case 0x1: {                        // SLLI (OK)
+                    const auto shamt = imm & 0x1F; // Shift amount (5 bits) (TODO...sus)
                     assembler.mov(EAX, shamt);
                     assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
                     assembler.vpsllvd(dst, src, TMP_DATA_REGISTER);
