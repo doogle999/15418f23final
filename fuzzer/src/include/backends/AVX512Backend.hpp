@@ -18,20 +18,21 @@
  * TODO: if mask registers all zero, or all one, special-case. If half-zero, try optimizing.
  */
 
-constexpr auto LANE_COUNT                 = 512 / 32;
-constexpr auto EAX                        = asmjit::x86::eax;
-constexpr auto TMP_SCALAR_REGISTER        = asmjit::x86::r15;
-constexpr auto RAX                        = asmjit::x86::rax;
-constexpr auto RSP                        = asmjit::x86::rax;
-constexpr auto EXECUTION_CONTROL_REGISTER = asmjit::x86::k2;
-constexpr auto TMP_MASK_REGISTER          = asmjit::x86::k1;
-constexpr auto TMP_DATA_REGISTER          = asmjit::x86::zmm0;
+static constexpr auto ADVANCED_BASIC_BLOCK_SUPPORT = true;
+static constexpr auto LANE_COUNT                   = 512 / 32;
+static constexpr auto EAX                          = asmjit::x86::eax;
+static constexpr auto TMP_SCALAR_REGISTER          = asmjit::x86::r15;
+static constexpr auto RAX                          = asmjit::x86::rax;
+static constexpr auto RSP                          = asmjit::x86::rax;
+static constexpr auto EXECUTION_CONTROL_REGISTER   = asmjit::x86::k2;
+static constexpr auto TMP_MASK_REGISTER            = asmjit::x86::k1;
+static constexpr auto TMP_DATA_REGISTER            = asmjit::x86::zmm0;
 
 static_assert(LANE_COUNT == 16);
 
 struct AVX512State {
     // Program counter,
-    std::uint32_t pc[32] {0};
+    std::uint32_t pc[32]{0};
 
     // Registers, they are called "x" in the technical document
     // x[0] is just constant 0, and so we have 31 general purpose registers
@@ -43,7 +44,7 @@ struct AVX512State {
 
 class AVX512Backend : AbstractMachineBackend {
 public:
-    AVX512Backend(uint8_t* memory, State state);
+    AVX512Backend(uint8_t* memory, State state, std::size_t programSize);
     void run() override;
 
 private:
