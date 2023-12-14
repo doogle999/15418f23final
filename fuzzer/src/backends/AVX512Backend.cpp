@@ -38,14 +38,28 @@ void AVX512Backend::run() {
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
     thread_local uint8_t scratch512b1[LANE_COUNT]{};
     thread_local uint8_t scratch512b2[LANE_COUNT]{};
-    thread_local uint8_t scratch512b3[LANE_COUNT]{};
     thread_local std::int64_t instructionNumber{-1};
     const auto opcode = static_cast<Opcode>(instruction.opcode());
+
+    assembler.bind(labels[instructionNumber]);
 
     instructionNumber++;
 
     // TODO: Think harder about memory layout + masking :(
     // TODO: think also about PC
+
+    // Part of control flow performance impact modeling
+    // (Yay, EVEX & good hardware!)
+    if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
+        assembler.vmovdqu32(asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(scratch512b1)), asmjit::x86::zmm1);
+        assembler.vmovdqu32(asmjit::x86::zmm1, asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(&state.pc)));
+        assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc[0])));
+        assembler.vpbroadcastd(TMP_DATA_REGISTER, RAX);
+        assembler.vpcmpd(EXECUTION_CONTROL_REGISTER, asmjit::x86::zmm1, TMP_DATA_REGISTER,
+                         asmjit::x86::VCmpImm::kEQ_OQ);
+        assembler.vmovdqu32(asmjit::x86::zmm1, asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(scratch512b1)));
+        assembler.vpxor(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
+    }
 
     switch (opcode) {
         case Opcode::LUI: { // OK
@@ -56,47 +70,74 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         case Opcode::AUIPC: { // OK
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
-            // tmp = &pc
-            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+            if constexpr (CAN_OPTIMIZE) {
+                // tmp = &pc
+                assembler.mov(TMP_SCALAR_REGISTER, instructionNumber * 4);
 
-            // dst = *tmp = pc
-            assembler.vmovdqa(dst, asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+                // dst = *tmp = pc
+                assembler.vpbroadcastd(dst, TMP_SCALAR_REGISTER); // rd = pc
 
-            // eax = imm
-            assembler.mov(EAX, instruction.raw & 0xfffff000);
+                // eax = imm
+                assembler.mov(EAX, (instructionNumber * 4) + (instruction.raw & 0xfffff000));
 
-            // tmp = eax = imm
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                // tmp = eax = imm
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+            } else {
+                // tmp = &pc
+                assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
 
-            // dst = dst + tmp = pc + imm
-            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER);
+                // dst = *tmp = pc
+                assembler.vmovdqa(dst, asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+
+                // eax = imm
+                assembler.mov(EAX, instruction.raw & 0xfffff000);
+
+                // tmp = eax = imm
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+
+                // dst = dst + tmp = pc + imm
+                assembler.vpaddd(dst, dst, TMP_DATA_REGISTER);
+            }
             break;
         }
-        case Opcode::JAL: { // TODO: Instrument instrument instrument (OK...ish)
+        case Opcode::JAL: {
             const auto imm = (((instruction.raw & (1u << 31)) >> 11) | ((instruction.raw & 0x7fe00000) >> 20) |
                               ((instruction.raw & 0x00100000) >> 9) | (instruction.raw & 0x000ff000)) |
                              (instruction.isHighestBitSet() ? 0xffe00000 : 0);
 
             const auto dst = asmjit::x86::zmm(instruction.rd());
 
-            assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
-            assembler.vmovdqa(asmjit::x86::zmm(instruction.rd()), asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
-            assembler.mov(EAX, imm);
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
-            assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), dst);
-            assembler.vpsubb(dst, dst, TMP_DATA_REGISTER); // - imm = pd
-            assembler.mov(EAX, 4);
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-            assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + 4
-
-            // TODO: the actual jump part
-            // Make sure not to do things incorrectly when it comes to updating pc after twice
+            if constexpr (CAN_OPTIMIZE) {
+                assembler.mov(EAX, (instructionNumber * 4) + 4);
+                assembler.vpbroadcastd(dst, EAX);
+            } else if (!ADVANCED_BASIC_BLOCK_SUPPORT) {
+                assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+                assembler.vmovdqa(asmjit::x86::zmm(instruction.rd()), asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+                assembler.mov(EAX, imm);
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
+                assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), dst);
+                assembler.vpsubb(dst, dst, TMP_DATA_REGISTER); // - imm = pd
+                assembler.mov(EAX, 4);
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + 4
+            } else {
+                assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
+                assembler.vmovdqa(asmjit::x86::zmm(instruction.rd()), asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+                assembler.mov(EAX, imm);
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
+                assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), dst);
+                assembler.vpsubb(dst, dst, TMP_DATA_REGISTER); // - imm = pd
+                assembler.mov(EAX, 4);
+                assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
+                assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + 4
+                assembler.jmp(labels[instructionNumber + imm / 4]);
+            }
 
             goto resetZeroRegister;
-            break;
         }
-        case Opcode::JALR: { // TODO: Instrument instrument instrument (OK...ish)
+        case Opcode::JALR: {
                              // TODO: rd = PC+4; PC = rs1 + imm
             const auto imm = instruction.imm() | (instruction.isHighestBitSet() ? 0xfffff000 : 0);
             const auto dst = asmjit::x86::zmm(instruction.rd());
@@ -114,16 +155,21 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src);                 // tmp = rs1 + imm
             assembler.vmovdqa(asmjit::x86::ptr(TMP_SCALAR_REGISTER), TMP_DATA_REGISTER); // pc = tmp = rs1 + imm
 
-            // TODO: Not sure how important the &1 ends up being...
-            // TODO: the actual jump part
+            if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
+                assembler.jmp(labels[instructionNumber + imm / 4]);
+            }
+
             goto resetZeroRegister;
-            break;
         }
         case Opcode::BRANCH: { // TODO: Instrument instrument instrument
             const auto fn3 = instruction.funct3();
             const auto rs1 = asmjit::x86::zmm(instruction.rs1());
             const auto rs2 = asmjit::x86::zmm(instruction.rs2());
             const auto rd  = instruction.rd();
+
+            if (CAN_OPTIMIZE) {
+                return;
+            }
 
             // AJAX:
             // The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
@@ -182,10 +228,16 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
 
             // update pc
             assembler.mov(RAX, &state.pc);
+
             assembler.k(TMP_MASK_REGISTER).vmovdqa32(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
 
             // restore from spill
             assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<uint64_t>(&scratch512b1)));
+
+            if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
+                assembler.jmp(labels[instructionNumber + imm / 4]);
+            }
+
             break;
         }
         case Opcode::LOAD: { // TODO: Instrument instrument instrument (and masks)
@@ -515,7 +567,18 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
     }
 
 incrementPC:
-// Zero the zero register lol
+    if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
+        // If we're just doing basic blocks, then we don't even need to think about PC.
+        assembler.mov(RAX, 4);
+        assembler.vpbroadcastb(TMP_DATA_REGISTER, RAX);
+        assembler.vmovdqu32(asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(scratch512b1)), asmjit::x86::zmm1);
+        assembler.vmovdqu32(asmjit::x86::zmm1, asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(state.pc)));
+        assembler.vpaddd(TMP_DATA_REGISTER, asmjit::x86::zmm1, TMP_DATA_REGISTER);
+        assembler.vmovdqu32(asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(scratch512b1)), TMP_DATA_REGISTER);
+        assembler.vmovdqu32(asmjit::x86::zmm1, asmjit::x86::Mem(reinterpret_cast<std::uint64_t>(scratch512b1)));
+    }
+
+// Zero the zero register lol considerably more straightforward
 resetZeroRegister:
     assembler.vpxorq(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
 }
@@ -545,12 +608,19 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state, std::size_t prog
 
         FuzzingStrategies::MaxEverythingStrategy(&laneLocalMemory[i], MEMORY_SIZE);
     }
+
+    std::vector<Instruction> instructions;
+    for (int i = 0; i < numberOfInstructions; i++) {
+        const auto instruction = Instruction{program[i * 4]};
+        instructions.push_back(instruction);
+    }
+    createBranchLabels(instructions);
 }
 
 void AVX512Backend::createBranchLabels(const std::vector<Instruction>& instructions) {
     for (auto i = 0ull; i < instructions.size(); ++i) {
         labels.push_back(assembler.newLabel());
-        const auto& instruction = instructions.at(i);
+        const auto& [uniqueId, raw] = instructions.at(i);
 
         if (0x70D0) {                           // TODO
             std::size_t targetIndex   = 0x70D0; // TODO
@@ -560,7 +630,7 @@ void AVX512Backend::createBranchLabels(const std::vector<Instruction>& instructi
             auto targetLabel   = assembler.newLabel();
             auto notTakenLabel = assembler.newLabel();
 
-            instructionIdToLabelsMap[instruction.uniqueId] = {targetLabel, notTakenLabel};
+            instructionIdToLabelsMap[uniqueId] = {targetLabel, notTakenLabel};
 
             instructionIdToLabelsMap[targetIndex].push_back(targetLabel);
             instructionIdToLabelsMap[notTakenIndex].push_back(notTakenLabel);

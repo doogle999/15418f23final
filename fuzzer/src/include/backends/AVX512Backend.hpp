@@ -18,15 +18,17 @@
  * TODO: if mask registers all zero, or all one, special-case. If half-zero, try optimizing.
  */
 
-static constexpr auto ADVANCED_BASIC_BLOCK_SUPPORT = true;
-static constexpr auto LANE_COUNT                   = 512 / 32;
-static constexpr auto EAX                          = asmjit::x86::eax;
-static constexpr auto TMP_SCALAR_REGISTER          = asmjit::x86::r15;
-static constexpr auto RAX                          = asmjit::x86::rax;
-static constexpr auto RSP                          = asmjit::x86::rax;
-static constexpr auto EXECUTION_CONTROL_REGISTER   = asmjit::x86::k2;
-static constexpr auto TMP_MASK_REGISTER            = asmjit::x86::k1;
-static constexpr auto TMP_DATA_REGISTER            = asmjit::x86::zmm0;
+static constexpr auto ADVANCED_BASIC_BLOCK_SUPPORT    = true; // Instruments code to model cost of divergence
+static constexpr auto APPLY_BASIC_BLOCK_OPTIMIZATIONS = true; // Applies basic-block specific optimizations
+static constexpr auto CAN_OPTIMIZE               = APPLY_BASIC_BLOCK_OPTIMIZATIONS && !ADVANCED_BASIC_BLOCK_SUPPORT;
+static constexpr auto LANE_COUNT                 = 512 / 32;
+static constexpr auto EAX                        = asmjit::x86::eax;
+static constexpr auto TMP_SCALAR_REGISTER        = asmjit::x86::r15;
+static constexpr auto RAX                        = asmjit::x86::rax;
+static constexpr auto RSP                        = asmjit::x86::rax;
+static constexpr auto EXECUTION_CONTROL_REGISTER = asmjit::x86::k2;
+static constexpr auto TMP_MASK_REGISTER          = asmjit::x86::k1;
+static constexpr auto TMP_DATA_REGISTER          = asmjit::x86::zmm0;
 
 static_assert(LANE_COUNT == 16);
 
