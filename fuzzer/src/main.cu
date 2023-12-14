@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
     // We set the stack pointer to 0 cuz, uh, sure
     state.x[2] = MEMORY_SIZE - 4;
 
-    auto backend = ClassicalBackend(memory, state);
+    auto backend = ClassicalBackend(memory, state, programSize);
     backend.run();
 
     free(memory);

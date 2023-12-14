@@ -55,12 +55,15 @@ struct State {
 
 class AbstractMachineBackend {
 public:
-    explicit AbstractMachineBackend(std::uint8_t* memory, State state)
-        : memory(memory), program(memory + MEMORY_SIZE), state(state){};
+    explicit AbstractMachineBackend(std::uint8_t* memory, State state, std::size_t programSize)
+        : memory(memory), program(memory + MEMORY_SIZE), state(state), programSize(programSize),
+          numberOfInstructions(programSize / 4){};
     virtual void run() = 0;
 
 protected:
     std::uint8_t* memory;
     std::uint8_t* program;
+    std::size_t programSize;
+    std::size_t numberOfInstructions;
     State state;
 };
