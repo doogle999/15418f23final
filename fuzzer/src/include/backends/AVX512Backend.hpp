@@ -20,7 +20,7 @@
 
 
 static constexpr auto ADVANCED_BASIC_BLOCK_SUPPORT = false; // Instruments code for coverage tracking & divergence model
-static constexpr auto APPLY_BASIC_BLOCK_OPTIMIZATIONS = true; // Applies basic-block specific optimizations
+static constexpr auto APPLY_BASIC_BLOCK_OPTIMIZATIONS = false; // Applies basic-block specific optimizations
 static constexpr auto CAN_OPTIMIZE               = APPLY_BASIC_BLOCK_OPTIMIZATIONS && !ADVANCED_BASIC_BLOCK_SUPPORT;
 static constexpr auto MAX_NUMBER_OF_INSTRUCTIONS = 32768;
 static constexpr auto LANE_COUNT                 = 512 / 32;
