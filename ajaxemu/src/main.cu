@@ -168,34 +168,34 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // lb
 				{
-					if(memOffset >= memorySize || memOffset <= programSize) { break; }
+					if(memOffset >= memorySize /* || memOffset <= programSize */) { break; }
 					uint8_t loaded = *(uint8_t*)(memory + memOffset);
 					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
 					break;
 				}
 				case 0x1: // lh
 				{
-					if((memOffset + 1) >= memorySize || memOffset <= programSize) { break; }
+					if((memOffset + 1) >= memorySize /* || memOffset <= programSize */) { break; }
 					uint16_t loaded = *(uint16_t*)(memory + memOffset);
 					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
 					break;
 				}
 				case 0x2: // lw
 				{
-					if((memOffset + 3) >= memorySize || memOffset <= programSize) { break; }
+					if((memOffset + 3) >= memorySize /* || memOffset <= programSize */) { break; }
 					state->x[rd] = *(uint32_t*)(memory + memOffset);
 					break;
 				}
 				case 0x4: // lbu
 				{
-					if(memOffset >= memorySize || memOffset <= programSize) { break; }
+					if(memOffset >= memorySize /* || memOffset <= programSize */) { break; }
 					uint8_t loaded = *(uint8_t*)(memory + memOffset);
 					state->x[rd] = loaded & 0x000000ff;
 					break;
 				}
 				case 0x5: // lhu
 				{
-					if((memOffset + 1) >= memorySize || memOffset <= programSize) { break; }
+					if((memOffset + 1) >= memorySize /* || memOffset <= programSize */) { break; }
 					uint16_t loaded = *(uint16_t*)(memory + memOffset);
 					state->x[rd] = loaded & 0x0000ffff;
 					break;
