@@ -5,24 +5,17 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "backends/MachineBackend.hpp"
-#include "backends/ClassicalBackend.hpp"
-#include "backends/AVX512Backend.hpp"
-
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-typedef struct RAMImage
-{
-	uint8_t* data;
-	uint32_t size;
-} RAMImage;
-
 typedef struct State
 {
-	uint32_t pc;
-	uint32_t x;
+    uint32_t pc;
+
+    uint32_t x[32];
 } State;
+
+#define MEMORY_SIZE 256
 
 void setup()
 {
@@ -46,96 +39,13 @@ void setup()
         printf("   CUDA Cap:   %d.%d\n", deviceProps.major, deviceProps.minor);
     }
     printf("---------------------------------------------------------\n");
-
-	// First we copy an image of the program and memory to execute
-	// Then we initialize the program state
-	// Then we launch the kernel
-
-	// It's a bit strange here just because we want to load the program into a buffer on the host side
-	// (Along with say, the initial memory) and then we want to copy all that for each instance on
-	// the device side
-
-	// Then we want our kernel call to give the relevant information for setting up the initial state of the program
-
-	// Once we have the processor state, and a copy of the memory on the device, we can start executing everything
-	
-    // cudaMalloc(&cudaDevicePosition, sizeof(float) * 3 * numberOfCircles);
-    // cudaMalloc(&cudaDeviceVelocity, sizeof(float) * 3 * numberOfCircles);
-    // cudaMalloc(&cudaDeviceColor, sizeof(float) * 3 * numberOfCircles);
-    // cudaMalloc(&cudaDeviceRadius, sizeof(float) * numberOfCircles);
-    // cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image->width * image->height);
-
-	// if(numberOfCircles < 1000)
-	// {
-	// 	maxAcreSubdiv = 2;
-	// }
-	
-	// int globalHitsSize = ((2 << (maxAcreSubdiv + acreStartdiv)) * (2 << (maxAcreSubdiv + acreStartdiv))) * numberOfCircles;
-	// int globalHitCountsSize = (2 << (maxAcreSubdiv + acreStartdiv)) * (2 << (maxAcreSubdiv + acreStartdiv));
-        
-	// cudaError_t mallocErrorCode = cudaMalloc(&globalHits, 3 * (sizeof(int) * globalHitsSize) + 2 * (sizeof(int) * globalHitCountsSize));
-
-	// if(mallocErrorCode != cudaSuccess)
-	// {
-	// 	printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocErrorCode));
-	// }
-    
-    // //cudaMalloc(&cudaDeviceParts, sizeof(unsigned char) * numberOfCircles);
-
-    // cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
-    // cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
-    // cudaMemcpy(cudaDeviceColor, color, sizeof(float) * 3 * numberOfCircles, cudaMemcpyHostToDevice);
-    // cudaMemcpy(cudaDeviceRadius, radius, sizeof(float) * numberOfCircles, cudaMemcpyHostToDevice);
-
-    // // Initialize parameters in constant memory.  We didn't talk about
-    // // constant memory in class, but the use of read-only constant
-    // // memory here is an optimization over just sticking these values
-    // // in device global memory.  NVIDIA GPUs have a few special tricks
-    // // for optimizing access to constant memory.  Using global memory
-    // // here would have worked just as well.  See the Programmer's
-    // // Guide for more information about constant memory.
-
-    // GlobalConstants params;
-    // params.sceneName = sceneName;
-    // params.numberOfCircles = numberOfCircles;
-    // params.imageWidth = image->width;
-    // params.imageHeight = image->height;
-    // params.position = cudaDevicePosition;
-    // params.velocity = cudaDeviceVelocity;
-    // params.color = cudaDeviceColor;
-    // params.radius = cudaDeviceRadius;
-    // params.imageData = cudaDeviceImageData;
-    
-    // //params.parts = cudaDeviceParts;
-
-    // cudaMemcpyToSymbol(cuConstRendererParams, &params, sizeof(GlobalConstants));
-
-    // // Also need to copy over the noise lookup tables, so we can
-    // // implement noise on the GPU
-    // int* permX;
-    // int* permY;
-    // float* value1D;
-    // getNoiseTables(&permX, &permY, &value1D);
-    // cudaMemcpyToSymbol(cuConstNoiseXPermutationTable, permX, sizeof(int) * 256);
-    // cudaMemcpyToSymbol(cuConstNoiseYPermutationTable, permY, sizeof(int) * 256);
-    // cudaMemcpyToSymbol(cuConstNoise1DValueTable, value1D, sizeof(float) * 256);
-
-    // // Copy over the color table that's used by the shading
-    // // function for circles in the snowflake demo
-
-    // float lookupTable[COLOR_MAP_SIZE][3] = {
-    //     {1.f, 1.f, 1.f},
-    //     {1.f, 1.f, 1.f},
-    //     {.8f, .9f, 1.f},
-    //     {.8f, .9f, 1.f},
-    //     {.8f, 0.8f, 1.f},
-    // };
-
-    // cudaMemcpyToSymbol(cuConstColorRamp, lookupTable, sizeof(float) * 3 * COLOR_MAP_SIZE);
 }
 
-__device__ void  runInstruction(State* state, uint32_t inst, uint8_t* memory, uint32_t memorySize)
-{	
+__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory)
+{
+	// Normally this is the destination register, but in S and B type instructions
+	// where there is not destination register these same bits communicate parts of an immediate
+	// value. We always need to look at these bits as a unit no matter what
 	uint32_t rd = (inst >> 7) & 0x1f; // Bits 11 to 7
 
 	uint32_t opcode = inst & 0x7f;
@@ -491,54 +401,46 @@ __device__ void  runInstruction(State* state, uint32_t inst, uint8_t* memory, ui
 	}
 }
 
-__global__ void kernelExecuteProgram()
+__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, unsigned int memorySize)
 {
-	State state;
-	
-	initState(state);
-	// We initalize a fake return address so that we can tell when we're done lol
-	// Make sure it's 4 byte aligned!
-	uint32_t const DONE_ADDRESS = 0xfffffff0; 
-	state.x[1] = DONE_ADDRESS;
+    unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
 
-	// We set the stack pointer to 0 cuz, uh, sure
-	state.x[2] = memorySize; 
+	uint8_t* memory = globalMemory + (memorySize * index);
+
+	State state;
+
+	for(int i = 0; i < 32; i++)
+	{
+		state.x[i] = 0;
+	}
+
+	state.pc = 0;
+
+	uint32_t const DONE_ADDRESS_CUDA = 0xfffffff0;
+	
+	state.x[1] = DONE_ADDRESS_CUDA;
+	state.x[2] = memorySize;
+
+	state.x[10] = index % 4;
 
 	while(1)
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
 		printf("executing instruction: %08x\n", inst);
-		runInstruction(&state, inst, memory);
+	    executeInstruction(&state, inst, memory);
 		printf("pc = %u\n", state.pc);
-		if(state.pc == DONE_ADDRESS)
+		if(state.pc == DONE_ADDRESS_CUDA)
 		{
 			break;
 		}
 	}
-	
-    int imageX = blockIdx.x * blockDim.x + threadIdx.x;
-    int imageY = blockIdx.y * blockDim.y + threadIdx.y;
-
-    int width = cuConstRendererParams.imageWidth;
-    int height = cuConstRendererParams.imageHeight;
-
-    if (imageX >= width || imageY >= height)
-        return;
-
-    int offset = 4 * (imageY * width + imageX);
-    float shade = .4f + .45f * static_cast<float>(height-imageY) / height;
-    float4 value = make_float4(shade, shade, shade, 1.f);
-
-    // Write to global memory: As an optimization, this code uses a float4
-    // store, which results in more efficient code than if it were coded as
-    // four separate float stores.
-    *(float4*)(&cuConstRendererParams.imageData[offset]) = value;
 }
 
 int main(int argc, char** argv)
 {
-    if (argc != 2) {
-        printf("Pass one argument, the filename.\n");
+    if(argc != 3)
+	{
+        printf("Pass two arguments, the filename and the entry address.\n");
         return 1;
     }
 
@@ -563,17 +465,58 @@ int main(int argc, char** argv)
     program = memory + MEMORY_SIZE;
     fread(program, sizeof(uint8_t), programSize, programFile);
 
-    auto state = State();
-    // We initalize a fake return address so that we can tell when we're done lol
-    state.x[1] = DONE_ADDRESS;
-    // We set the stack pointer to 0 cuz, uh, sure
-    state.x[2] = MEMORY_SIZE;
-
 	setup();
 
-    auto backend = ClassicalBackend(memory, state);
-    backend.run();
+    uint8_t* deviceProgramImage;
+	cudaError_t mallocErrorCode = cudaMalloc(&deviceProgramImage, sizeof(uint8_t) * programSize);
+	if(mallocErrorCode != cudaSuccess)
+	{
+		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocErrorCode));
+	}
+	cudaMemcpy(deviceProgramImage, program, sizeof(uint8_t) * programSize, cudaMemcpyHostToDevice);
 
+	dim3 blockDim(16);
+	dim3 gridDim(1);
+
+	uint8_t* deviceMemoryImage;
+	cudaError_t mallocMemoryImageError = cudaMalloc(&deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x);
+	if(mallocMemoryImageError != cudaSuccess)
+	{
+		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocMemoryImageError));
+	}
+		
+	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE);
+
+	cudaError_t errorCode = cudaPeekAtLastError();
+	if(errorCode != cudaSuccess)
+	{
+		printf("FAILED TO LAUNCH KERNEL: %s\n", cudaGetErrorString(errorCode));
+	}
+	cudaDeviceSynchronize();
+
+	uint8_t* memDump = (uint8_t*)malloc(sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x);
+
+	cudaMemcpy(memDump, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x, cudaMemcpyDeviceToHost);
+
+	uint32_t const BYTES_PER_LINE = 4 * 4;
+	for(uint32_t j = 0; j < blockDim.x * gridDim.x; j++)
+	{
+		for(uint32_t i = 0; i < MEMORY_SIZE; i += 1)
+		{
+			if(i % BYTES_PER_LINE == 0)
+			{
+				printf("\n");
+			}
+			printf("%02x ", *(uint8_t*)(memDump + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
+		}
+		printf("\n");
+	}
+
+	free(memDump);
+	
+	cudaFree(deviceProgramImage);
+	cudaFree(deviceMemoryImage);
+	
     free(memory);
 
     return 0;

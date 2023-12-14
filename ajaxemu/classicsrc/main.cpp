@@ -473,7 +473,7 @@ int main(int argc, char** argv)
 	state.x[1] = DONE_ADDRESS;
 
 	// We set the stack pointer to 0 cuz, uh, sure
-	state.x[2] = memorySize - 4; 
+	state.x[2] = memorySize; 
 
 	while(1)
 	{
