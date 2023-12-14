@@ -83,7 +83,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				imm |= 0xffe00000;
 			}
-			state->pc += (int32_t)imm;
+			state->pc += imm;
 			break;
 		}
 		case 0x67: // jalr
@@ -119,36 +119,41 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				case 0x0: // beq
 				{
 					if(state->x[rs1] == state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				case 0x1: // bne
 				{
 					if(state->x[rs1] != state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				case 0x4: // blt (this is signed)
 				{
 					if((int32_t)state->x[rs1] < (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				case 0x5: // bge (this is signed)
 				{
 					if((int32_t)state->x[rs1] >= (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				case 0x6: // bltu (this is unsigned)
 				{
 					if((uint32_t)state->x[rs1] < (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				case 0x7: // bgeu (this is unsigned)
 				{
 					if((uint32_t)state->x[rs1] >= (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
+					else { state->pc += 4; }
 					break;
 				}
 				// TODO: handle if it isn't one of these? Set trap maybe?
 			}
-			state->pc += 4;
 			break;
 		}
 		case 0x03: // lb, lh, lw, lbu, lhu
@@ -159,6 +164,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			if(inst & (1 << 31))
 			{
 				imm |= 0xfffff000;
+				//printf("sign extended, %u, %d\n", imm, (int32_t)imm);
 			}
 			// funct3 again
 			uint32_t memOffset = (state->x[rs1] + (int32_t)imm);
@@ -174,7 +180,8 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				case 0x5: { extra = 1; break; }
 			}
 
-			printf("memOffset, extra, %u, %u\n", memOffset, extra);
+			// printf("memOffset, extra, %u, %u\n", memOffset, extra);
+			// printf("reg value %u\n", state->x[rs1]);
 			
 			if(memOffset + extra >= memorySize)
 			{
@@ -196,30 +203,30 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // lb
 				{
-					uint8_t loaded = *(uint8_t*)(basePtr + (int32_t)memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
 					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
 					break;
 				}
 				case 0x1: // lh
 				{
-					uint16_t loaded = *(uint16_t*)(basePtr + (int32_t)memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
 					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
 					break;
 				}
 				case 0x2: // lw
 				{
-					state->x[rd] = *(uint32_t*)(basePtr + (int32_t)memOffset);
+					state->x[rd] = *(uint32_t*)(basePtr + memOffset);
 					break;
 				}
 				case 0x4: // lbu
 				{
-					uint8_t loaded = *(uint8_t*)(basePtr + (int32_t)memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
 					state->x[rd] = loaded & 0x000000ff;
 					break;
 				}
 				case 0x5: // lhu
 				{
-					uint16_t loaded = *(uint16_t*)(basePtr + (int32_t)memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
 					state->x[rd] = loaded & 0x0000ffff;
 					break;
 				}
@@ -239,6 +246,9 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				imm |= 0xfffff000;
 			}
+
+			// printf("Storing value: %u to: %u\n", state->x[rs2], (uint32_t)(state->x[rs1] + (int32_t)imm));
+			
 			switch((inst >> 12) & 0x7)
 			{
 				case 0x0: // sb
@@ -274,7 +284,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // addi
 				{
-					state->x[rd] = state->x[rs1] + imm;
+					state->x[rd] = state->x[rs1] + (int32_t)imm;
 					break;
 				}
 				case 0x2: // slti
@@ -346,7 +356,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				{
 					// Oh and arithmetic overflow is ignored (aka we don't care, and you know what, just use what our implementation does)
 					// This isn't 122
-					if(inst & (1 << 30)) // add
+					if((inst & (1 << 30)) == 0) // add
 					{
 						state->x[rd] = state->x[rs1] + state->x[rs2];
 					}
@@ -447,10 +457,17 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 	uint32_t const DONE_ADDRESS_CUDA = 0xfffffff0;
 	
 	state.x[1] = DONE_ADDRESS_CUDA;
+	
 	state.x[2] = argv;
 
 	state.x[10] = argc;
 	state.x[11] = argv;
+
+// 	printf("argv + 0 = %u, argv + 4 = %u, argv + 8 = %u\n", argv + 0, argv + 4, argv + 8);
+
+// printf("argv[0] = %s\n", (memory + *(uint32_t*)(memory + (argv))));
+// printf("argv[1] = %s\n", (memory + *(uint32_t*)(memory + (argv + 4))));
+// printf("argv[2] = %s\n", (memory + *(uint32_t*)(memory + (argv + 8))));
 
 	int count = 0;
 	while(count < 1000)
@@ -608,6 +625,10 @@ int main(int argc, char** argv)
 	{
 		for(uint32_t i = 0; i < MEMORY_SIZE - programSize; i += 1)
 		{
+			if(MEMORY_SIZE - i == stackStart)
+			{
+				printf("\n");
+			}
 			if(i % BYTES_PER_LINE == 0)
 			{
 				printf("\n");
