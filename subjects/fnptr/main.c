@@ -35,9 +35,9 @@ int main(int argc, char** argv)
 
 	void (*outputNumberFn)(int*) = outputZero;
 
-	if(compare(argv[1], "three")) outputNumberFn = outputThree;
-	else if(compare(argv[1], "five")) outputNumberFn = outputFive;
-	else if(compare(argv[1], "seven")) outputNumberFn = outputSeven;
+	if(compare(argv[1], "three") == 0) outputNumberFn = outputThree;
+	else if(compare(argv[1], "five") == 0) outputNumberFn = outputFive;
+	else if(compare(argv[1], "seven") == 0) outputNumberFn = outputSeven;
 
 	outputNumberFn(&result);
 
