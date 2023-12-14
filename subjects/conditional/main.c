@@ -5,7 +5,7 @@ int checkIfGood(int x)
 
 int compare(char const* a, char const* b)
 {	
-	while(*a && (*(a++) == *(b++))) {}
+	while(*a && (*a == *b)) { a++; b++; }
 	return *(unsigned char const*)a - *(unsigned char const*)b;
 }
 
