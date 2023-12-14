@@ -55,9 +55,10 @@ private:
     std::unordered_map<std::size_t, std::vector<asmjit::Label>> instructionIdToLabelsMap;
     std::vector<asmjit::Label> labels;
     asmjit::x86::Assembler assembler{};
-    AVX512State state{}; // TODO: init properly :(
-    asmjit::CodeHolder code{};
-    asmjit::JitRuntime runtime{};
+    AVX512State state{};
+    asmjit::Environment environment;
+    asmjit::CodeHolder code;
+    asmjit::JitRuntime runtime;
     void emitInstruction(const Instruction& instruction);
     std::unique_ptr<std::uint8_t[]> laneLocalMemory;
     std::array<std::uint32_t, LANE_COUNT> laneBaseAddressOffsets{};
