@@ -17,7 +17,7 @@ int main(int argc, char** argv)
 	
 	if(!checkIfGood(argc))
 	{
-		return 1;
+		return -argc;
 	}
 
 	if(compare(argv[2], "word"))
