@@ -27,13 +27,13 @@ int main(int argc, char** argv)
 
 	if(compare(argv[1], "123") == 0)
 	{
-		outbuffer[0] = 0xffeeacac;
+		outbuffer[0] = 7;
 		outbuffer[1] = 8;
 		outbuffer[2] = 9;
 	}
 	else
 	{
-		outbuffer[0] = 0xabcd1234;
+		outbuffer[0] = 1;
 		outbuffer[1] = 2;
 		outbuffer[2] = 3;
 	}

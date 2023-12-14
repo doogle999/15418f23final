@@ -465,6 +465,7 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 		}
 		count++;
 	}
+	printf("return value: (as an int): %d\n", (int32_t)state.x[10]);
 }
 
 // TODO
