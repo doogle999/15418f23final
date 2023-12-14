@@ -1,681 +1,1094 @@
-#include <iostream>
+#include "common.h"
+#include "mpi.h"
+#include "quad-tree.h"
+#include "timing.h"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <functional>
+#include <immintrin.h>
+#include <mutex>
+#include <queue>
+#include <sys/ipc.h>
+#include <sys/mman.h>
+#include <sys/shm.h>
+// #include <thread>
+#include <immintrin.h>
+#include <unordered_map>
+#include <xmmintrin.h>
 
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+// stolen from linux, shouldn't be a problem though?
+#define unlikely(x) __builtin_expect(!!(x), 0)
 
-#include <cuda.h>
-#include <cuda_runtime.h>
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic ignored "-Wc++17-extensions"
 
-typedef struct State
-{
-    uint32_t pc;
-    uint32_t x[32];
-} State;
+inline float fastSqrt(const float x) { return _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(x))); }
 
-typedef struct Result
-{
-    int32_t returnVal;
-    int32_t errorCode;
-} Result;
+template<bool careAboutStability>
+inline float fastInverseSqrt(float x) {
+    // Based on an old Intel post I'd seen a while ago & bookmarked, though the idea is very straightforward
+    // http://web.archive.org/web/20140718000055/http://software.intel.com/en-us/articles/interactive-ray-tracing
+    // Of course, it's not a great fit for this assignment, so I've changed it considerably to work better for us
+    const auto guess = _mm_rsqrt_ss(_mm_set_ss(x));
 
-// void setup()
-// {
-//     int deviceCount = 0;
-//     std::string name;
-//     cudaError_t err = cudaGetDeviceCount(&deviceCount);
+    if constexpr (!careAboutStability) {
+        return _mm_cvtss_f32(guess);
+    }
 
-//     printf("---------------------------------------------------------\n");
-//     printf("Initializing CUDA for Cuda Fuzzer\n");
-//     printf("Found %d CUDA devices\n", deviceCount);
-
-//     for(int i = 0; i < deviceCount; i++)
-// 	{
-//         cudaDeviceProp deviceProps;
-//         cudaGetDeviceProperties(&deviceProps, i);
-//         name = deviceProps.name;
-
-//         printf("Device %d: %s\n", i, deviceProps.name);
-//         printf("   SMs:        %d\n", deviceProps.multiProcessorCount);
-//         printf("   Global mem: %.0f MB\n", static_cast<float>(deviceProps.totalGlobalMem) / (1024 * 1024));
-//         printf("   CUDA Cap:   %d.%d\n", deviceProps.major, deviceProps.minor);
-//     }
-//     printf("---------------------------------------------------------\n");
-// }
-
-__device__ __inline__ int executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint8_t* program, uint32_t memorySize, uint32_t programSize)
-{
-	// Normally this is the destination register, but in S and B type instructions
-	// where there is not destination register these same bits communicate parts of an immediate
-	// value. We always need to look at these bits as a unit no matter what
-	uint32_t rd = (inst >> 7) & 0x1f; // Bits 11 to 7
-
-	uint32_t opcode = inst & 0x7f;
-	
-	// I literally just put these in the order they are in as I read them from page 106 of the
-	// RISCV user guide version 2.2 lol
-	// There are certainly better ways to do this!
-	switch(opcode)
-	{
-		case 0x37: // lui
-		{
-			// We don't need to load it into low bits, then reshift it into high bits... can just read the bits in place!
-			// Lower bits are filled with zeros according to standard
-			state->x[rd] = inst & 0xfffff000;
-			state->pc += 4;
-			break;
-		}
-		case 0x17: // auipc
-		{
-			// Mirrors the above, but result is imm + offset from pc
-			state->x[rd] = state->pc + (inst & 0xfffff000);
-			state->pc += 4;
-			break;
-		}
-		case 0x6f: // jal
-		{
-			// This part seems like it would be much nicer in hardware...
-			// The bit order is very strange, [20|10:1|11|19:12]
-			// so 31 -> 20 == 11, 30 -> 10 == 20, 20 -> 11 == 9, 19 -> 19 == 0
-			// Since right shift doing sign extension is implementation dependent, and
-			// this wants sign extension, we do it manually...
-			// also, yes, this is correct -- it doesn't set lsb
-			uint32_t imm = ((inst & (1 << 31)) >> 11) | ((inst & 0x7fe00000) >> 20) | ((inst & 0x00100000) >> 9) | (inst & 0x000ff000);
-			state->x[rd] = state->pc + 4;
-			// Two cases: either our machine does sign extension and this is redundant, or it defaults to 0 extension and we need this
-			// No machine will default to 1 extension so we're all good
-			if(inst & (1 << 31))
-			{
-				imm |= 0xffe00000;
-			}
-			state->pc += imm;
-			break;
-		}
-		case 0x67: // jalr
-		{
-			// This wants us to use a temporary in case the destination register and source register are the same
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			uint32_t temp = state->pc + 4;
-			// Oh yeah we have to sign this one again, but bits are nicer, [11:0], so 31 -> 11 == 20
-			uint32_t imm = (inst >> 20);
-			if(inst & (1 << 31))
-			{
-				imm |= 0xfffff000;
-			}
-			state->pc = (state->x[rs1] + (int32_t)imm) & ~1;
-			state->x[rd] = temp;
-			break;
-		}
-		case 0x63: // beq, bne, blt, bge, bltu, bgeu
-		{
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			uint32_t rs2 = (inst >> 20) & 0x1f;
-			// The immediate for jump offset is cursed again, high bits are [12|10:5] and then rd has [4:1|11]
-			// 31 -> 12 == 19, 30 -> 10 == 20, 4 -> 4 == 0, 0 -> 11 == -11
-			// we have to sign extend again as well
-			uint32_t imm = ((inst & (1 << 31)) >> 19) | ((inst & 0x7e000000) >> 20) | (rd & 0x1e) | ((rd & 0x1) << 11);
-			if(inst & (1 << 31))
-			{
-				imm |= 0xffffe000;
-			}
-			// funct3 (bits 14:12) determines which of the comparisons to do
-			switch((inst >> 12) & 0x7)
-			{
-				case 0x0: // beq
-				{
-					if(state->x[rs1] == state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				case 0x1: // bne
-				{
-					if(state->x[rs1] != state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				case 0x4: // blt (this is signed)
-				{
-					if((int32_t)state->x[rs1] < (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				case 0x5: // bge (this is signed)
-				{
-					if((int32_t)state->x[rs1] >= (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				case 0x6: // bltu (this is unsigned)
-				{
-					if((uint32_t)state->x[rs1] < (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				case 0x7: // bgeu (this is unsigned)
-				{
-					if((uint32_t)state->x[rs1] >= (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
-					else { state->pc += 4; }
-					break;
-				}
-				// TODO: handle if it isn't one of these? Set trap maybe?
-			}
-			break;
-		}
-		case 0x03: // lb, lh, lw, lbu, lhu
-		{
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			// Same format as jalr
-			uint32_t imm = (inst >> 20);
-			if(inst & (1 << 31))
-			{
-				imm |= 0xfffff000;
-				//printf("sign extended, %u, %d\n", imm, (int32_t)imm);
-			}
-			// funct3 again
-			uint32_t memOffset = (state->x[rs1] + (int32_t)imm);
-
-			uint32_t funct3 = (inst >> 12) & 0x7;
-			uint32_t extra = 0;
-			switch(funct3)
-			{
-				case 0x0: { extra = 0; break; }
-				case 0x1: { extra = 1; break; }
-				case 0x2: { extra = 3; break; }
-				case 0x4: { extra = 0; break; }
-				case 0x5: { extra = 1; break; }
-			}
-
-			// printf("memOffset, extra, %u, %u\n", memOffset, extra);
-			// printf("reg value %u\n", state->x[rs1]);
-			
-			if(memOffset + extra >= memorySize)
-			{
-			    state->x[0] = -2;
-			    return;
-			}
-			uint8_t* basePtr = memory;
-			if(memOffset < programSize)
-			{
-				if(memOffset + extra >= programSize)
-				{
-					state->x[0] = -1;
-					return;
-				}
-				basePtr = program;
-			}
-			
-			switch(funct3)
-			{
-				case 0x0: // lb
-				{
-					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
-					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
-					break;
-				}
-				case 0x1: // lh
-				{
-					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
-					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
-					break;
-				}
-				case 0x2: // lw
-				{
-					state->x[rd] = *(uint32_t*)(basePtr + memOffset);
-					break;
-				}
-				case 0x4: // lbu
-				{
-					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
-					state->x[rd] = loaded & 0x000000ff;
-					break;
-				}
-				case 0x5: // lhu
-				{
-					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
-					state->x[rd] = loaded & 0x0000ffff;
-					break;
-				}
-				// TODO: handle if it isn't one of these? Set trap maybe?
-			}
-			state->pc += 4;
-			break;
-		}
-		case 0x23: // sb, sh, sw
-		{
-			// In this one, we reuse rs1 as the memory location (well plus the immediate offset) and we use rs2 as the source
-			// This means the immediate is split up again
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			uint32_t rs2 = (inst >> 20) & 0x1f;
-			uint32_t imm = ((inst & 0xfe000000) >> 20) | rd;
-			if(inst & (1 << 31))
-			{
-				imm |= 0xfffff000;
-			}
-
-			// printf("Storing value: %u to: %u\n", state->x[rs2], (uint32_t)(state->x[rs1] + (int32_t)imm));
-			
-			switch((inst >> 12) & 0x7)
-			{
-				case 0x0: // sb
-				{
-					*(uint8_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
-					break;
-				}
-				case 0x1: // sh
-				{
-					*(uint16_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
-					break;
-				}
-				case 0x2: // sw
-				{
-					*(uint32_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
-					break;
-				}
-				// TODO: handle default?
-			}
-			state->pc += 4;
-			break;
-		}
-		case 0x13: // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
-		{
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			uint32_t imm = (inst >> 20);
-			if(inst & (1 << 31))
-			{
-				imm |= 0xfffff000;
-			}
-			// funct3 again
-			switch((inst >> 12) & 0x7)
-			{
-				case 0x0: // addi
-				{
-					state->x[rd] = state->x[rs1] + (int32_t)imm;
-					break;
-				}
-				case 0x2: // slti
-				{
-					// I'm pretty sure c standard says true statements always get set to 1 but just to make
-					// it clear
-					state->x[rd] = ((int32_t)state->x[rs1] < (int32_t)imm) ? 1 : 0;
-					break;
-				}
-				case 0x3: // sltiu
-				{
-					state->x[rd] = ((uint32_t)state->x[rs1] < (uint32_t)imm) ? 1 : 0;
-					break;
-				}
-				case 0x4: // xori
-				{
-					state->x[rd] = state->x[rs1] ^ imm;
-					break;
-				}
-				case 0x6: // ori
-				{
-					state->x[rd] = state->x[rs1] | imm;
-					break;
-				}
-				case 0x7: // andi
-				{
-					state->x[rd] = state->x[rs1] & imm;
-					break;
-				}
-				case 0x1: // slli
-				{
-					// TODO: these instructions only use the lowest 5 bits of imm, and
-					// the standard says the high bits are all 0 (or 1 of them is 1 for srai)
-					// I assume it should be illegal operation if that's not the case?
-					state->x[rd] = state->x[rs1] << (imm & 0x1f);
-					break;
-				}
-				case 0x5: // srli, srai are differentiated by a 1 in the 30th bit
-				{
-					uint32_t shamt = imm & 0x1f;
-					if(inst & (1 << 30))
-					{
-						state->x[rd] = (int32_t)(state->x[rs1]) >> shamt;
-						if((state->x[rs1] & (1 << 31)) && shamt)
-						{
-							// Bit shifts by 32 are undefined by c standard so we actually can't use this which is extremely cringe
-							// because it won't work on 0 shift... so we just special case it. 
-							state->x[rd] |= ~0 << (32 - shamt);
-						}
-					}
-					else
-					{
-						// Don't do sign extension (don't need to do anything special here)
-						state->x[rd] = (uint32_t)(state->x[rs1]) >> shamt;
-					}
-					break;
-				}
-			}
-			state->pc += 4;
-			break;
-		}
-		case 0x33: // add, sub, sll, slt, sltu, xor, srl, sra, or, and
-		{
-			uint32_t rs1 = (inst >> 15) & 0x1f;
-			uint32_t rs2 = (inst >> 20) & 0x1f;
-			switch((inst >> 12) & 0x7)
-			{
-				case 0x0: // add, sub are differentiated again by funct7 (only 1 bit of it tho), inst bit 30
-				{
-					// Oh and arithmetic overflow is ignored (aka we don't care, and you know what, just use what our implementation does)
-					// This isn't 122
-					if((inst & (1 << 30)) == 0) // add
-					{
-						state->x[rd] = state->x[rs1] + state->x[rs2];
-					}
-					else // sub
-					{
-						state->x[rd] = state->x[rs1] - state->x[rs2];
-					}
-					break;
-				}
-				case 0x1: // sll
-				{
-					// This only cares about the lower 5 bits
-					state->x[rd] = state->x[rs1] << (state->x[rs2] & 0x1f);
-					break;
-				}
-				case 0x2: // slt
-				{
-					state->x[rd] = ((int32_t)state->x[rs1] < (int32_t)state->x[rs2]) ? 1 : 0;
-					break;
-				}
-				case 0x3: // sltu
-				{
-					state->x[rd] = ((uint32_t)state->x[rs1] < (uint32_t)state->x[rs2]) ? 1 : 0;
-					break;
-				}
-				case 0x4: // xor
-				{
-					state->x[rd] = state->x[rs1] ^ state->x[rs2];
-					break;
-				}
-				case 0x5: // srl, sra
-				{
-					uint32_t shamt = state->x[rs2] & 0x1f;
-					if(inst & (1 << 30)) 
-					{
-						state->x[rd] = (int32_t)(state->x[rs1]) >> shamt;
-						if(state->x[rs1] & (1 << 31) && shamt)
-						{
-							state->x[rd] |= ~0 << (32 - shamt);
-						}
-					}
-					else
-					{
-						state->x[rd] = (uint32_t)(state->x[rs1]) >> shamt;
-					}
-					break;
-				}
-				case 0x6: // or
-				{
-					state->x[rd] = state->x[rs1] | state->x[rs2];
-					break;
-				}
-				case 0x7: // and
-				{
-					state->x[rd] = state->x[rs1] & state->x[rs2];
-					break;
-				}
-			}
-			state->pc += 4;
-			break;
-		}
-		case 0x0f: // fence, fence.i
-		{
-			// TODO: do something other than nop?
-			state->pc += 4;
-			break;
-		}
-		case 0x73: // ecall, ebreak, csrrw, csrrs, csrrc, csrrwi, csrrsi, csrrci
-		{
-			// TODO: do something other than nop?
-			state->pc += 4;
-			break;
-		}
-	}
-
-	// We could have written to 0, so just put it back to 0
-	if(rd == 0) 
-	{
-		state->x[rd] = 0;
-	}
-
-	return 0;
+    if (unlikely(x < 10)) {
+        const auto muls = _mm_mul_ss(_mm_mul_ss(guess, guess), _mm_set_ss(x));
+        const auto half_nr = _mm_mul_ss(_mm_set_ss(0.5f), guess);
+        const auto result = _mm_mul_ss(half_nr, _mm_sub_ss(_mm_set_ss(3.0f), muls));
+        return _mm_cvtss_f32(result);
+    } else {
+        return _mm_cvtss_f32(guess);
+    }
 }
 
-__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry, Result* globalResults, uint32_t maxOps)
-{
-    uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+// if this could be properly vectorized, because we can bound the size of near, it'd be possible to do way better
+// alas, their (lack of) march settings prevent us from doing that. though I actually haven't checked if
+// __attribute__((target("avx2"))) would let us use those intrinsics...
+template<bool careAboutStability>
+static inline Vec2 computeForceFast(const Particle& target, const Particle& attractor, float cullRadius,
+                                    float cullRadius2) {
+    auto dir = (attractor.position - target.position);
+    const auto dist2 = dir.length2();
 
-	uint8_t* memory = globalMemory + (memorySize * index);
+    if (dist2 < ((1e-3f) * (1e-3f))) {
+        return Vec2(0.0f, 0.0f);
+    }
+    if (dist2 > cullRadius2) {
+        return Vec2(0.0f, 0.0f);
+    }
 
-	Result* myResults = globalResults + index;
-
-	State state;
-
-	for(int i = 0; i < 32; i++)
-	{
-		state.x[i] = 0;
-	}
-
-	state.pc = entry;
-
-	uint32_t const DONE_ADDRESS_CUDA = 0xfffffff0;
-	
-	state.x[1] = DONE_ADDRESS_CUDA;
-	
-	state.x[2] = argv;
-
-	state.x[10] = argc;
-	state.x[11] = argv;
-
-// 	printf("argv + 0 = %u, argv + 4 = %u, argv + 8 = %u\n", argv + 0, argv + 4, argv + 8);
-
-// printf("argv[0] = %s\n", (memory + *(uint32_t*)(memory + (argv))));
-// printf("argv[1] = %s\n", (memory + *(uint32_t*)(memory + (argv + 4))));
-// printf("argv[2] = %s\n", (memory + *(uint32_t*)(memory + (argv + 8))));
-
-	int count = 0;
-	while(count < maxOps)
-	{
-		uint32_t inst = *(uint32_t*)(program + state.pc);
-		//printf("executing instruction: %08x\n", inst);
-		//printf("pc = %u\n", state.pc);
-		if(executeInstruction(&state, inst, memory, program, memorySize, programSize) || state.pc == DONE_ADDRESS_CUDA)
-		{
-			break;
-		}
-		count++;
-	}
-
-	myResults->returnVal = state.x[10];
-	myResults->errorCode = state.x[0]; // If we have an error, just write to x[0] and self destruct out of the loop
+    const float G = 0.01f;
+    Vec2 force;
+    if (dist2 < (1e-1f * 1e-1f)) {
+        // last branch should inform branch here. hopefully gcc doesnt hoist
+        dir *= fastInverseSqrt<careAboutStability>(dist2); //(1.0f / sqrt(dist2));
+        const auto dist = 1e-1f;                           // gcc will take care of simplifying all of this
+        force = dir * attractor.mass * (G / (dist * dist));
+        if (dist > cullRadius * 0.75f) {
+            float decay = 1.0f - (dist - cullRadius * 0.75f) / (cullRadius * 0.25f);
+            force *= decay;
+        }
+    } else {
+        // last branch should inform branch here. hopefully gcc doesnt hoist
+        const auto reciprocal = fastInverseSqrt<careAboutStability>(dist2); // (1.0f / sqrt(dist2));
+        dir *= reciprocal;
+        force = dir * attractor.mass * (G / (dist2));
+        if (dist2 > (cullRadius * 0.75f) * (cullRadius * 0.75f)) {
+            const auto dist = fastSqrt(dist2);
+            float decay = 1.0f - (dist - cullRadius * 0.75f) / (cullRadius * 0.25f);
+            force *= decay;
+        }
+    }
+    return force;
 }
 
-// TODO
-// STEP 0: Accepts entry point (30 min)
-// STEP 1: Cuda program accepts inputs (30 min)
-// STEP 2: Cuda program can record (save where we jumped from + where we jumped to) (1 hour)
-// STEP 3: Mutation engine (1 hour)
-
-int main(int argc, char** argv)
-{	
-    if(argc < 3)
-	{
-        printf("Format: <program file to execute> <entry address as a number in hex> <args to be passed to subject program>");
-        return 1;
+// Slower version
+template<bool usingSharedMemory, bool isKnownDelta>
+void simulateStep(QuadTree& quadTree, const Task task, Particle* particles, Particle* newParticles,
+                  const StepParameters params) {
+    // based on simple-simulator.cpp with edits
+    static auto near = std::vector<Particle>();
+    float deltaTime;
+    if constexpr (isKnownDelta) {
+        deltaTime = 0.2f;
+    } else {
+        deltaTime = params.deltaTime;
     }
 
-	// Make this way larger than it really needs to be because otherwise it can get accidentally clobbered by program
-	// taking up the same mem space, don't have time to fix
-	dim3 blockDim(256);
-	dim3 gridDim(32);
+    const auto cullRadius = params.cullRadius;
 
-    uint32_t const MEMORY_SIZE = 4 * 256; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
-	uint32_t const INSTANCE_COUNT = blockDim.x * gridDim.x;
-	uint32_t const MAX_OPS = 10000;
+    for (auto i = task.start; i < task.end; i++) {
+        const auto& it = particles[i];
+        auto force = Vec2(0.0f, 0.0f);
+        quadTree.getParticles(near, it.position, params.cullRadius);
+        if (!near.empty()) {
+            for (const auto& j: near) {
+                if ((j.position - it.position).length2() < 0) {
+                    __builtin_unreachable();
+                }
+                force += computeForce(it, j, cullRadius);
+            }
+        }
+        if constexpr (usingSharedMemory) {
+            newParticles[i] = updateParticle(it, force, deltaTime);
+        } else {
+            newParticles[i - task.start] = updateParticle(it, force, deltaTime);
+        }
+    }
+}
 
-	// First step: program instructions
-	// Reading the program instructions into a buffer
-    FILE* programFile = fopen(argv[1], "rb");
-    if(!programFile)
-	{
-        printf("Couldn't open program file \"%s\".\n", argv[1]);
-        return 1;
+// Saves 2 ops
+__attribute__((noinline)) static Particle updateParticleFast(const Particle& pi, Vec2 force, float deltaTime) {
+    Particle result = pi;
+    result.velocity += force * deltaTime;
+    result.position += result.velocity * deltaTime;
+    return result;
+}
+
+__attribute__((target("avx2"))) static inline float hsum(const __m256 reg) {
+    float v[8];
+    _mm256_storeu_ps(v, reg);
+    return ((v[0] + v[1]) + (v[2] + v[3])) + ((v[4] + v[5]) + (v[6] + v[7]));
+}
+
+auto near = std::array<Particle, 8192>{}; // sufficient, but larger or smaller doesn't really matter
+template<bool usingSharedMemory, bool isKnownDelta, int N, bool careAboutStability>
+__attribute__((target("avx2,fma"))) void simulateStep(QuadTree& quadTree, const Task task, Particle* particles,
+                                                      Particle* newParticles, const StepParameters params) {
+    // based on simple-simulator.cpp with edits
+    float deltaTime;
+    if constexpr (isKnownDelta) {
+        deltaTime = 0.2f;
+    } else {
+        deltaTime = params.deltaTime;
     }
-    fseek(programFile, 0, SEEK_END); 
-    uint32_t const programSize = ftell(programFile);
-    rewind(programFile);
-	uint8_t* program = (uint8_t*)malloc(programSize);
-    if(!program)
-	{
-        printf("Failed to allocate enough memory for the instructions for the emulator.\n");
-        return 1;
+
+    constexpr float cullRadius = N * 1.25f;
+    constexpr float cullRadius2 = cullRadius * cullRadius;
+    static_assert(cullRadius2 == cullRadius * cullRadius);
+    constexpr float G = 0.01f;
+
+    for (auto i = task.start; i < task.end; i++) {
+        const auto& it = particles[i];
+        const auto numParticles = quadTree.getParticles(near.data(), it.position, cullRadius2);
+
+        auto force = Vec2(0.0f, 0.0f);
+
+        // yeah I have 316 homework I don't want to do, how can you tell?
+        if (numParticles) {
+            const auto& target = it;
+            const auto reallyReallyReallyCloseCutoff = _mm256_set1_ps(1e-3f * 1e-3f);
+            const auto _cullRadius2 = _mm256_set1_ps(cullRadius2);
+            const auto _cullRadius75 = _mm256_set1_ps(cullRadius * 0.75f);
+            const auto _cullRadiusInv14 = _mm256_set1_ps(1.0f / (cullRadius * 0.25f));
+
+            const auto targetPosX = _mm256_set1_ps(target.position.x);
+            const auto targetPosY = _mm256_set1_ps(target.position.y);
+
+            auto vforceX = _mm256_setzero_ps();
+            auto vforceY = _mm256_setzero_ps();
+
+            auto j{0};
+            for (; j <= numParticles - 8; j += 8) {
+                // for (; j < numParticles - 8; j += 8) {
+                // faster for me on my machine but not on ghc :(
+                // const auto thisParticlePtr = &near[j];
+                //
+                // constexpr auto OFFSET_OF_X = offsetof(Particle, position.x);
+                // constexpr auto OFFSET_OF_Y = offsetof(Particle, position.y);
+                // constexpr auto OFFSET_OF_MASS = offsetof(Particle, mass);
+                //
+                // const auto vxptr =
+                //         _mm256_setr_epi32(OFFSET_OF_X, OFFSET_OF_X + sizeof(Particle),
+                //                           OFFSET_OF_X + 2 * sizeof(Particle), OFFSET_OF_X + 3 * sizeof(Particle),
+                //                           OFFSET_OF_X + 4 * sizeof(Particle), OFFSET_OF_X + 5 * sizeof(Particle),
+                //                           OFFSET_OF_X + 6 * sizeof(Particle), OFFSET_OF_X + 7 * sizeof(Particle));
+                //
+                // const auto vyptr =
+                //         _mm256_setr_epi32(OFFSET_OF_Y, OFFSET_OF_Y + sizeof(Particle),
+                //                           OFFSET_OF_Y + 2 * sizeof(Particle), OFFSET_OF_Y + 3 * sizeof(Particle),
+                //                           OFFSET_OF_Y + 4 * sizeof(Particle), OFFSET_OF_Y + 5 * sizeof(Particle),
+                //                           OFFSET_OF_Y + 6 * sizeof(Particle), OFFSET_OF_Y + 7 * sizeof(Particle));
+                //
+                // const auto vmassptr =
+                //         _mm256_setr_epi32(OFFSET_OF_MASS, OFFSET_OF_MASS + sizeof(Particle),
+                //                           OFFSET_OF_MASS + 2 * sizeof(Particle), OFFSET_OF_MASS + 3 *
+                //                           sizeof(Particle), OFFSET_OF_MASS + 4 * sizeof(Particle), OFFSET_OF_MASS + 5
+                //                           * sizeof(Particle), OFFSET_OF_MASS + 6 * sizeof(Particle), OFFSET_OF_MASS +
+                //                           7 * sizeof(Particle));
+                //
+                // const auto vposX = _mm256_i32gather_ps(reinterpret_cast<const float*>(thisParticlePtr), vxptr, 1);
+                //
+                // const auto vposY = _mm256_i32gather_ps(reinterpret_cast<const float*>(thisParticlePtr), vyptr, 1);
+                //
+                // const auto vmass = _mm256_i32gather_ps(reinterpret_cast<const float*>(thisParticlePtr), vmassptr, 1);
+
+                // extremely upsetting that this outperforms the above on ghc
+                float xs[8], ys[8], masses[8];
+                // #pragma GCC unroll 8
+                for (size_t u = 0; u < 8; ++u) {    // 2.1%
+                    xs[u] = near[j + u].position.x; // 1.6%
+                    ys[u] = near[j + u].position.y; // 0.7%
+                    masses[u] = near[j + u].mass;   // 1.5%
+                    _mm_prefetch(reinterpret_cast<const char*>(&near[8 + j + u].position.x), _MM_HINT_T0);
+                    _mm_prefetch(reinterpret_cast<const char*>(&near[8 + j + u].mass), _MM_HINT_T0);
+                }
+
+                const auto vposX = _mm256_loadu_ps(xs);
+                const auto vposY = _mm256_loadu_ps(ys);
+
+                auto vdirX = _mm256_sub_ps(vposX, targetPosX);
+                auto vdirY = _mm256_sub_ps(vposY, targetPosY);
+
+                const auto vdist2 = _mm256_add_ps(_mm256_mul_ps(vdirX, vdirX), _mm256_mul_ps(vdirY, vdirY));
+
+                // !(dist > cullRadius || dist < 1e-3f)
+                const auto mask = _mm256_and_ps(_mm256_cmp_ps(vdist2, reallyReallyReallyCloseCutoff, _CMP_GE_OQ),
+                                                _mm256_cmp_ps(vdist2, _cullRadius2, _CMP_LE_OQ));
+
+                if (_mm256_testz_ps(mask, mask)) { // 0.6%
+                    continue;
+                }
+
+                const auto vinvDist =
+                        careAboutStability ? _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_sqrt_ps(vdist2)) : _mm256_rsqrt_ps(vdist2);
+                const auto vdist = _mm256_rcp_ps(vinvDist);
+                vdirX = _mm256_mul_ps(vdirX, vinvDist);
+                vdirY = _mm256_mul_ps(vdirY, vinvDist);
+
+                // TODO: ideally we reuse vinvDist by transforming it and then squaring (or squaring and transforming)
+                const auto dist2norm = _mm256_max_ps(vdist2, _mm256_set1_ps(1e-2f));
+                const auto vmass = _mm256_loadu_ps(masses);
+                const auto vforce = careAboutStability ? _mm256_div_ps(vmass, dist2norm)
+                                                       : _mm256_mul_ps(vmass, _mm256_rcp_ps(dist2norm));
+                auto vnewForceX = _mm256_mul_ps(vdirX, vforce);
+                auto vnewForceY = _mm256_mul_ps(vdirY, vforce);
+
+                // decay
+                const auto vdistnorm = _mm256_max_ps(vdist, _mm256_set1_ps(1e-1f));
+
+                // It'd be nice if we could use this, but the numerical stability that we get from this is such that
+                // we're actually notably better than the reference solution. That's a problem because it looks like
+                // we're wrong!
+                // const auto vdecay = _mm256_fmsub_ps(vdistnorm, _cullRadiusInv14, _mm256_set1_ps(-4.0f));
+
+                // Instead, we use this...
+                const auto vdecay = _mm256_sub_ps(_mm256_set1_ps(4.0f), _mm256_mul_ps(vdistnorm, _cullRadiusInv14));
+                const auto decayMask = _mm256_cmp_ps(vdistnorm, _cullRadius75, _CMP_GT_OQ);
+
+                // Blends are super fast. The multiplication is the bigger issue here.
+                vnewForceX = _mm256_blendv_ps(vnewForceX, _mm256_mul_ps(vnewForceX, vdecay), decayMask);
+                vnewForceY = _mm256_blendv_ps(vnewForceY, _mm256_mul_ps(vnewForceY, vdecay), decayMask);
+
+                vforceX = _mm256_add_ps(vforceX, _mm256_and_ps(vnewForceX, mask));
+                vforceY = _mm256_add_ps(vforceY, _mm256_and_ps(vnewForceY, mask));
+            }
+
+            // plenty fast. dont bother optimizing.
+            force.x += hsum(vforceX);
+            force.y += hsum(vforceY);
+
+            for (; j < numParticles; j++) {
+                const auto& k = near[j];
+                const auto& target = it;
+                const auto& attractor = k;
+
+                auto dir = (attractor.position - target.position);
+                const auto dist2 = dir.length2();
+
+                if (dist2 < ((1e-3f) * (1e-3f))) {
+                    continue;
+                }
+                if (dist2 > cullRadius2) {
+                    continue;
+                }
+
+                Vec2 newForce;
+                if (dist2 < (1e-1f * 1e-1f)) {
+                    // last branch should inform branch here. hopefully gcc doesnt hoist
+                    dir *= fastInverseSqrt<careAboutStability>(dist2); //(1.0f / sqrt(dist2));
+                    const auto dist = 1e-1f;                           // gcc will take care of simplifying all of this
+                    newForce = dir * (attractor.mass / (dist * dist));
+                    if (dist > cullRadius * 0.75f) {
+                        float decay = 1.0f - (dist - cullRadius * 0.75f) / (cullRadius * 0.25f);
+                        newForce *= decay;
+                    }
+                } else {
+                    // last branch should inform branch here. hopefully gcc doesnt hoist
+                    const auto reciprocal = fastInverseSqrt<careAboutStability>(dist2); // (1.0f / sqrt(dist2));
+                    dir *= reciprocal;
+                    newForce = dir * (attractor.mass / dist2);
+                    if (dist2 > (cullRadius * 0.75f) * (cullRadius * 0.75f)) {
+                        const auto dist = fastSqrt(dist2);
+                        float decay = 1.0f - (dist - cullRadius * 0.75f) / (cullRadius * 0.25f);
+                        newForce *= decay;
+                    }
+                }
+
+                force += newForce;
+            }
+        } /*else if constexpr (usingSharedMemory) {
+            newParticles[i] = it;
+            continue;
+        } else {
+            newParticles[i - task.start] = it;
+            continue;
+        }*/
+        force *= G;
+        if constexpr (usingSharedMemory) {
+            newParticles[i] = updateParticleFast(it, force, deltaTime);
+        } else {
+            newParticles[i - task.start] = updateParticleFast(it, force, deltaTime);
+        }
     }
-    fread(program, sizeof(uint8_t), programSize, programFile); // We're offset by 4 so we can force 0 addr to be special
-	// At this point, host has the program instructions in memory
-	uint8_t* deviceProgramImage;
-	cudaError_t programMallocErrorCode = cudaMalloc(&deviceProgramImage, programSize);
-	if(programMallocErrorCode != cudaSuccess)
+}
+
+// TODO: move to header
+using SimulateStepType = void (*)(QuadTree&, const Task, Particle*, Particle*, const StepParameters);
+using SpecializationTable = std::unordered_map<int, SimulateStepType>;
+
+SpecializationTable specializedFunctions = {};
+SpecializationTable specializedFunctionsDangerous = {};
+
+template<std::size_t N>
+struct Initializer {
+    static void init(SpecializationTable& safe, SpecializationTable& dangerous) {
+        safe[N] = &simulateStep<true, true, N, true>;
+        dangerous[N] = &simulateStep<true, true, N, false>;
+        Initializer<N - 4>::init(safe, dangerous);
+    }
+};
+
+template<>
+struct Initializer<0> {
+    static void init(SpecializationTable& safe, SpecializationTable& dangerous) {
+        safe[1] = &simulateStep<true, true, 1, true>;
+        dangerous[1] = &simulateStep<true, true, 1, false>;
+    }
+};
+
+void initializeSpecializedSimulateSteps() {
+    Initializer<120>::init(specializedFunctions, specializedFunctionsDangerous);
+}
+
+// Textbook bit-interleave. there are like a zillion ways to do this, and since this course has 213 as a prereq, I doubt
+// it matters that this isn't original. I'd like to rewrite this but it's not even important to the algorithm and I'd
+// like to just have a correct baseline for now. Like, I'm pretty sure 213 even links to Bit Twiddling Hacks?
+// Given that pdep/pext exist and we're targeting x86 here (i.e., if the Makefile had march=native, this would almost be
+// a builtin) and this is therefore practically a polyfill to overcome an overly restrictive Makefile, I'd hope me copy
+// pasting this is fine...
+// Anyway, the code is a rip from Knuth's TAOCP
+uint64_t interleaveBits(const uint32_t a, const uint32_t b) {
+    static const uint64_t masks[] = {0x5555555555555555, 0x3333333333333333, 0x0F0F0F0F0F0F0F0F, 0x00FF00FF00FF00FF,
+                                     0x0000FFFF0000FFFF};
+    static const uint64_t shifts[] = {1, 2, 4, 8, 16};
+
+    uint64_t result = a | (static_cast<uint64_t>(b) << 32);
+    for (int i = 4; i >= 0; --i) {
+        result = (result & ~masks[i]) | ((result << shifts[i]) & masks[i]);
+    }
+    return result;
+}
+
+static inline uint32_t toInt(float a, float min, float max) {
+    return static_cast<uint32_t>(1000.0f * (a - min) / (max - min));
+}
+
+void simulateStepXD(QuadTree& quadTree, const Task task, Particle* particles, Particle* newParticles,
+                  const StepParameters params)
+{
+    // based on simple-simulator.cpp with edits
+    static auto near = std::vector<Particle>();
+    float deltaTime = params.deltaTime;
+
+    const auto cullRadius = params.cullRadius;
+
+    for (auto i = task.start; i < task.end; i++) {
+        const auto& it = particles[i];
+        auto force = Vec2(0.0f, 0.0f);
+        quadTree.getParticles(near, it.position, params.cullRadius);
+        if (!near.empty()) {
+            for (const auto& j: near) {
+                if ((j.position - it.position).length2() < 0) {
+                    __builtin_unreachable();
+                }
+                force += computeForce(it, j, cullRadius);
+            }
+        }
+		newParticles[i] = updateParticle(it, force, deltaTime);
+    }
+}
+
+// Ajax solve
+void solveAjax(unsigned int const rank, unsigned int const nproc, StartupOptions const& options)
+{
+	const unsigned int gridEdgeDiv = sqrt(nproc);
+	if(gridEdgeDiv * gridEdgeDiv != nproc)
 	{
-		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(programMallocErrorCode));
-		return 1;
+		perror("nproc not square");
+		exit(1);
 	}
-	cudaMemcpy(deviceProgramImage, program, programSize, cudaMemcpyHostToDevice);
-	// At this point, device has the program instructions in memory
-
-	// Second step: we need to initialize the state for the processor. This means setting register 0 to all 0s,
-	// setting register 1 to the done address (right after last instruction in program), setting register 1 to the top of the stack,
-	// setting register 10 to argc, and setting register 11 to argv. To calculate done address and top of stack, we just need to the
-	// size of the program and the size of the argument strings, so that means we need to have the input already
-	// We also need to set pc, which is constant across instances. All these things we pass when we invoke the kernel
 	
-	// Third step: input (we're going to base all of our program variability on argv)
-	// So we need to produce images of the arguments to send to the device. This is going to reside just above the instance's stack
-	// Basically: every instance needs space for initial stuff + some actual stack memory to execute with
-	// Nothing is on the stack to start, we pass argc and argv by setting registers 10 and 11
-	// So above the stack we have: actual strings, then pointers to them pointed to by argv, then the actual stack
-	// So now we allocate the memory images for the program
-	uint8_t* memory = (uint8_t*)malloc(MEMORY_SIZE * INSTANCE_COUNT);
-	if(!memory)
-	{
-		printf("Failed to allocate enough memory for the emulator.\n");
-		return 1;
-	}
-	memset(memory, 0, MEMORY_SIZE * INSTANCE_COUNT);
-	// For now, we're literally just going to pass through arguments from our actual call of this program.
-	// So argv[3..] correspond to argv[1..] in the subject program and argv[1] in our program is argv[0] in subject
-	int32_t argcSubj = argc - 2;
-	uint32_t* argvSubjOffsets = (uint32_t*)malloc(argcSubj * sizeof(uint32_t));
-	argvSubjOffsets[0] = strlen(argv[1]) + 1;
-	strncpy((char*)(memory + (MEMORY_SIZE - argvSubjOffsets[0])), argv[1], argvSubjOffsets[0]);
-	for(int32_t i = 1; i < argcSubj; i++)
-	{
-		// Can't use stpcpy because we need to know size before hand because we are storing "backwards" because we only know
-		// Higher address because stack grows down
-		uint32_t tempLength = strlen(argv[i + 2]) + 1;
-	    argvSubjOffsets[i] = tempLength + argvSubjOffsets[i - 1];
-		if(argvSubjOffsets[i] > MEMORY_SIZE)
-		{
-			printf("MEMORY_SIZE insufficient to store arg strings for subject program\n");
-			return 1;
-		}
-		strncpy((char*)(memory + (MEMORY_SIZE - argvSubjOffsets[i])), argv[i + 2], tempLength);
-	}
+	const auto parameters = getBenchmarkStepParams(options.spaceSize);
+
+	std::vector<Particle> particleDump;
+	int particleCount;
+
+	//auto particleSortingMap = std::unordered_map<int, int>{};
 	
-	// Still need to copy the pointers to these
-	uint32_t argvArrayEnd = argvSubjOffsets[argcSubj - 1];
-	argvArrayEnd = argvArrayEnd + ((4 - (argvArrayEnd % 4)) % 4); // Alignment...
-	if(argvArrayEnd + (4 * argcSubj) >= MEMORY_SIZE)
+	if(rank == MANAGER_PID)
 	{
-		printf("MEMORY_SIZE insufficient to store arg strings for subject program\n");
-		return 1;
-	}
-	for(int32_t i = 0; i < argcSubj; i++)
-	{
-		// All programs see their memory as offset relative to their own memory chunk so this is ok to copy
-		*(uint32_t*)(memory + (MEMORY_SIZE - argvArrayEnd - (4 * (i + 1)))) = MEMORY_SIZE - argvSubjOffsets[argcSubj - i - 1];
-	}
-	// Now all args are copied to the first instances host memory, so we copy them to all the instances
-	uint32_t stackStart = MEMORY_SIZE - (argvArrayEnd + (argcSubj * 4)); // Remember, starting stack pointer value is not usable immediately, dec first, so this ok
-	for(uint32_t i = 1; i < INSTANCE_COUNT; i++)
-	{
-		// Make sure memory size is big enough or problems will happen
-		memcpy(memory + ((MEMORY_SIZE * i) + stackStart), memory + stackStart, MEMORY_SIZE - stackStart);
-	}
-	// Finally can copy all of them to device... a little wasteful, since much of this will be zeroes, but I figure better than many small calls
-	// could theoretically seperate these regions of memory but would require complex redirect system on emulator memory system...
-	uint8_t* deviceMemoryImage;
-    cudaError_t mallocMemoryImageError = cudaMalloc(&deviceMemoryImage, MEMORY_SIZE * INSTANCE_COUNT);
-	if(mallocMemoryImageError != cudaSuccess)
-	{
-		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocMemoryImageError));
-		return 1;
-	}
-	cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
-	free(argvSubjOffsets);
-	// Should now have both program and memory images on the device
+		loadFromFile(options.inputFile, particleDump);
+		particleCount = particleDump.size();
 
-	uint32_t entryPoint = (uint32_t)strtol(argv[2], NULL, 16);
-
-	// Oh, and we have to set up a place for return values + important codes
-    Result* deviceResultImage;
-	cudaError_t mallocResultImageError = cudaMalloc(&deviceResultImage, INSTANCE_COUNT * sizeof(Result));
-	if(mallocResultImageError != cudaSuccess)
-	{
-		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocResultImageError));
-		return 1;
+		// for(auto i = 0ul; i < particleDump.size(); i++)
+		// {
+        //     particleSortingMap[i] = particleDump[i].id;
+        // }
 	}
 
-	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS);
+	MPI_Bcast(&particleCount, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	particleDump.resize(particleCount);
+	MPI_Bcast(particleDump.data(), particleCount * sizeof(Particle), MPI_BYTE, 0,
+			  MPI_COMM_WORLD);
 
-	cudaError_t errorCode = cudaPeekAtLastError();
-	if(errorCode != cudaSuccess)
-	{
-		printf("FAILED TO LAUNCH KERNEL: %s\n", cudaGetErrorString(errorCode));
-	}
-	cudaDeviceSynchronize();
+	// auto particleShmId {0};
+    // key_t particleShmKey{1337};
 
-	// Print results
-	// Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
-	// cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+	// Particle* particles {nullptr};
 
-	// for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
+	// // Manager just loads particles to dump and creates shared memory spaces
+	// if(rank == MANAGER_PID)
 	// {
-	// 	printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
-	// }
-	// free(localResults);
+	// 	loadFromFile(options.inputFile, particleDump);
 
-	// Printing memory dumps
-	//cudaMemcpy(memory, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+	// 	const auto SHM_SIZE = particleDump.size() * sizeof(Particle); 
 
-	// uint32_t const BYTES_PER_LINE = 4 * 4;
-	// for(uint32_t j = 0; j < INSTANCE_COUNT; j++)
-	// {
-	// 	for(uint32_t i = 0; i < MEMORY_SIZE - programSize; i += 1)
+	// 	particleShmId = shmget(particleShmKey, SHM_SIZE, IPC_CREAT | 0666);
+	// 	if(particleShmId < 0)
 	// 	{
-	// 		if(MEMORY_SIZE - i == stackStart)
-	// 		{
-	// 			printf("\n");
-	// 		}
-	// 		if(i % BYTES_PER_LINE == 0)
-	// 		{
-	// 			printf("\n");
-	// 		}
-	// 		printf("%02x ", *(uint8_t*)(memory + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
+	// 		perror("shmget");
+	// 		exit(1);
 	// 	}
-	// 	printf("\n");
+	// 	particles = static_cast<Particle*>(shmat(particleShmId, nullptr, 0));
+    //     if((void*)particles == (void*)-1)
+	// 	{
+    //         perror("shmat");
+    //         exit(1);
+    //     }
 	// }
-	
-	cudaFree(deviceProgramImage);
-	cudaFree(deviceMemoryImage);
-	
-    free(memory);
-	free(program);
 
+	// // Manager tells everyone else where the shared memory is
+	// MPI_Bcast(&particleShmId, 1, MPI_INT, MANAGER_PID, MPI_COMM_WORLD);
+
+	// // Manager already did this, now everyone else does -- attaching shared memory
+	// if(rank != MANAGER_PID)
+	// {
+    //     particles = static_cast<Particle*>(shmat(particleShmId, nullptr, 0));
+    //     if((void*)particles == (void*)-1)
+	// 	{
+    //         perror("shmat");
+    //         exit(1);
+    //     }
+	// }
+
+	// Now that everyone has the shared memory, manager just memcpys to it...
+	// MPI_Barrier(MPI_COMM_WORLD);
+    // if(rank == MANAGER_PID)
+	// {
+    //     std::memcpy(particles, particleDump.data(), particleDump.size() * sizeof(Particle));
+    // }
+
+	//std::cerr << "memcpying particle dump, rank = " << rank << std::endl;
+
+	// ...and then everyone copies it to their particle dump
+    // MPI_Barrier(MPI_COMM_WORLD);
+    // particleDump.resize(options.numParticles);
+    // std::memcpy(particleDump.data(), particles, options.numParticles * sizeof(Particle));
+
+	// We're all set
+	MPI_Barrier(MPI_COMM_WORLD);
+
+	Timer totalSimulationTimer;
+
+	const int GRID_UPDATE_REGULARITY = 5;
+	
+	std::vector<Particle> myAcreParticles;
+	std::vector<Particle> myAcreParticlesOut;
+
+	struct AcreBound
+	{
+		Vec2 min;
+		Vec2 max;
+
+		void reset() { min = Vec2(1e30f, 1e30f); max = Vec2(-1e30f, -1e30f); }
+
+		// This is just a quick and easy version, conservative
+		static bool interacting(AcreBound const& a, AcreBound const& b, float radius)
+			{
+				return (a.max.x + radius > b.min.x - radius) && (b.max.x + radius > a.min.x - radius) &&
+					(a.max.y + radius > b.min.y - radius) && (b.max.y + radius > a.min.y - radius);
+			}
+	};
+
+	std::vector<unsigned int> acreCounts(nproc);
+	
+	AcreBound myAcreBound;
+	std::vector<AcreBound> acreBounds(nproc);
+	
+	std::vector<MPI_Request> sendHandles(nproc);
+	std::vector<MPI_Request> recvHandles(nproc);
+
+	unsigned int globalOffset = 0;
+
+	constexpr auto NUMERICAL_INSTABILITY_THRESHOLD = 10; // num iterations before we start caring about instability
+
+	const auto N = parameters.cullRadius / 1.25f;
+	const auto specialization = static_cast<int>(std::round(parameters.cullRadius / 1.25f));
+    const auto canSpecializeCullRadius = specializedFunctions.find(N) != specializedFunctions.end();
+    const auto canSpecializeDeltaTime = parameters.deltaTime == 0.2f;
+
+	//std::cerr << "entering main loop, rank = " << rank << std::endl;
+	
+	for(unsigned int i = 0; i < options.numIterations; i++)
+	{
+		MPI_Barrier(MPI_COMM_WORLD);
+		if(i % GRID_UPDATE_REGULARITY == 0)
+		{
+
+			// Basic idea here is that we create a fixed, square grid that covers all the particles
+			// Each worker then is assigned to exactly 1 grid acre (hehe, we're back to acres)
+			// This is to simplify communication between threads
+			// Each worker then builds a quadtree of the particles inside its acre
+		
+			// In order to resolve gravitational forces from particles near other acres, we check
+			// if any of our particles are nearby other acres and then are ready to ask those other workers
+			// for a getParticles at the relevant position
+
+			// As the simulation progresses the worker keeps track of the same set of particles it was
+			// assigned, but the acre size can change as the particles move around, thus we will regularly
+			// reassign the workers back to acres aligned with the grid
+
+			// NOTE: particleDump is essentially our input buffer and particles is essentially our output buffer
+			// for each step. Yes, every worker thread can see every particle, even though for this scheme it's
+			// somewhat unnecessary
+
+			// Here we assign workers by id to their acre and then have them build a quadtree of those particles
+			// std::vector<size_t> myAcreParticles;
+			{
+				// Need bounds in order to assign particles to acres...
+				// We do a huge amount of redundant work here, especially since
+				// we've already had to memcpy this stuff
+				Vec2 bmin(1e30f, 1e30f);
+				Vec2 bmax(-1e30f, -1e30f);
+				for(auto& p : particleDump)
+				{
+					bmin.x = (bmin.x < p.position.x) ? bmin.x : p.position.x;
+					bmin.y = (bmin.y < p.position.y) ? bmin.y : p.position.y;
+					bmax.x = (bmax.x > p.position.x) ? bmax.x : p.position.x;
+					bmax.y = (bmax.y > p.position.y) ? bmax.y : p.position.y;
+				}
+
+				signed char myAcreX = rank % gridEdgeDiv;
+				signed char myAcreY = rank / gridEdgeDiv;
+
+				myAcreBound.min = Vec2(((float)myAcreX / (float)gridEdgeDiv) * (bmax.x - bmin.x), ((float)myAcreY / (float)gridEdgeDiv) * (bmax.y - bmin.y));
+				myAcreBound.max = Vec2(((float)(myAcreX + 1) / (float)gridEdgeDiv) * (bmax.x - bmin.x), ((float)(myAcreY + 1) / (float)gridEdgeDiv) * (bmax.y - bmin.y));
+
+				myAcreParticles.clear();
+				
+				for(size_t j = 0; j < particleDump.size(); j++)
+				{
+					signed char particleAcreX = ((float)gridEdgeDiv * (particleDump[j].position.x - bmin.x)) / ((bmax.x - bmin.x) * 1.0f);
+					signed char particleAcreY = ((float)gridEdgeDiv * (particleDump[j].position.y - bmin.y)) / ((bmax.y - bmin.y) * 1.0f);
+
+					if(particleAcreX >= gridEdgeDiv)
+					{
+						particleAcreX = gridEdgeDiv - 1;
+					}
+					if(particleAcreY >= gridEdgeDiv)
+					{
+						particleAcreY = gridEdgeDiv - 1;
+					}
+					
+					if(particleAcreX == myAcreX && particleAcreY == myAcreY)
+					{
+						// myAcreParticles.push_back(j);
+						myAcreParticles.push_back(particleDump[j]);
+					}
+				}
+
+				myAcreParticlesOut.resize(myAcreParticles.size());
+
+				unsigned int sizeToSend = (unsigned int)(myAcreParticles.size());
+
+				MPI_Allgather(&sizeToSend, sizeof(sizeToSend), MPI_BYTE,
+							  acreCounts.data(), sizeof(sizeToSend), MPI_BYTE,
+							  MPI_COMM_WORLD);
+			}
+			//std::cerr << "done setting bounds rank = " << rank << std::endl;
+		}
+		else
+		{
+			std::swap(myAcreParticles, myAcreParticlesOut);
+		}
+
+		myAcreBound.min = Vec2(1e30f, 1e30f);
+		myAcreBound.max = Vec2(-1e30f, -1e30f);
+		for(auto& p : myAcreParticles)
+		{
+			myAcreBound.min.x = myAcreBound.min.x < p.position.x ? myAcreBound.min.x : p.position.x;
+			myAcreBound.min.y = myAcreBound.min.y < p.position.y ? myAcreBound.min.y : p.position.y;
+			myAcreBound.max.x = myAcreBound.max.x > p.position.x ? myAcreBound.max.x : p.position.x;
+			myAcreBound.max.y = myAcreBound.max.y > p.position.y ? myAcreBound.max.y : p.position.y;
+		}
+		
+		// Need to make sure everyone is ready to communicate
+		MPI_Barrier(MPI_COMM_WORLD);
+
+		// Everyone calculates their interacting neighbor pairs, then we transfer particles between interacting pairs,
+		// then we build everyone's quad trees and they all do their simulation on only their particles
+		
+		// Everyone needs to know everyone else's acre bounds to see if they interact
+		MPI_Allgather(&myAcreBound, sizeof(myAcreBound), MPI_BYTE,
+					  acreBounds.data(), sizeof(myAcreBound), MPI_BYTE,
+					  MPI_COMM_WORLD);
+
+		MPI_Barrier(MPI_COMM_WORLD);
+
+		std::vector<Particle> localParticles = myAcreParticles;
+		
+		std::vector<unsigned int> interactors(0);
+
+		unsigned int interactingParticles = 0;
+
+		signed char myAcreX = rank % gridEdgeDiv;
+		signed char myAcreY = rank / gridEdgeDiv;
+
+		const int adjust = 2;
+		
+		// for(int xi = myAcreX - adjust; xi < myAcreX + adjust + 1; xi++)
+		// {
+		// 	for(int yi = myAcreY - adjust; yi < myAcreY + adjust + 1; yi++)
+		// 	{
+		// 		if(xi >= 0 && xi < gridEdgeDiv && yi >= 0 && yi < gridEdgeDiv)
+		// 		{
+		// 			int j = xi + yi * gridEdgeDiv;
+
+		// 			if(j < 0 || j >= (int)nproc || j == rank)
+		// 			{
+
+		// 			}
+		// 			else if(std::find(interactors.begin(), interactors.end(), j) == interactors.end() && AcreBound::interacting(myAcreBound, acreBounds[j], parameters.cullRadius / 2.0f))
+		// 			{
+		// 				interactors.emplace_back(j);
+
+		// 				MPI_Isend(myAcreParticles.data(),
+		// 						  myAcreParticles.size() * sizeof(Particle),
+		// 						  MPI_BYTE,
+		// 						  j,
+		// 						  0,
+		// 						  MPI_COMM_WORLD,
+		// 						  &sendHandles[j]);
+
+		// 				interactingParticles += acreCounts[j];
+		// 			}
+		// 		}
+		// 	}
+		// }
+		
+		// for(int k = 0; k < 8; k++)
+		// {
+		// 	int stride = gridEdgeDiv;
+		// 	int j = rank;
+		// 	j = rank;
+		// 	switch(k)
+		// 	{
+		// 	case 0: j += -1; break;
+		// 	case 1: j += 1; break;
+		// 	case 2: j += -stride; break;
+		// 	case 3: j += stride; break;
+		// 	case 4: j += stride - 1; break;
+		// 	case 5: j += stride + 1; break;
+		// 	case 6: j += -stride + 1; break;
+		// 	case 7: j += -stride - 1; break;
+		// 	}
+		// 	if(j < 0 || j >= (int)nproc || j == rank)
+		// 	{
+
+		// 	}
+		// 	else if(std::find(interactors.begin(), interactors.end(), j) == interactors.end() && AcreBound::interacting(myAcreBound, acreBounds[j], parameters.cullRadius / 2.0f))
+		// 	{
+		// 		interactors.emplace_back(j);
+
+		// 		MPI_Isend(myAcreParticles.data(),
+		// 				  myAcreParticles.size() * sizeof(Particle),
+		// 				  MPI_BYTE,
+		// 				  j,
+		// 				  0,
+		// 				  MPI_COMM_WORLD,
+		// 				  &sendHandles[j]);
+
+		// 		interactingParticles += acreCounts[j];
+		// 	}
+		// }
+		
+		for(unsigned int j = 0; j < nproc; j++)
+		{
+			if(j != rank && AcreBound::interacting(myAcreBound, acreBounds[j], parameters.cullRadius / 2.0f))
+			{
+				interactors.emplace_back(j);
+
+				MPI_Isend(myAcreParticles.data(),
+						  myAcreParticles.size() * sizeof(Particle),
+						  MPI_BYTE,
+						  j,
+						  0,
+						  MPI_COMM_WORLD,
+						  &sendHandles[j]);
+
+				interactingParticles += acreCounts[j];
+			}
+		}
+
+		localParticles.resize(myAcreParticles.size() + interactingParticles);
+
+		unsigned int offset = myAcreParticles.size();
+		for(unsigned int j = 0; j < interactors.size(); j++)
+		{
+			auto& actor = interactors[j];
+			const auto interactorParticleSize = sizeof(Particle) * acreCounts[actor];
+			MPI_Irecv(
+				&localParticles[offset],
+				interactorParticleSize,
+				MPI_BYTE,
+				actor,
+				0,
+				MPI_COMM_WORLD,
+				&recvHandles[j]);
+			offset += acreCounts[actor];
+		}
+
+		MPI_Waitall(interactors.size(), recvHandles.data(), MPI_STATUSES_IGNORE);
+		
+		// We still need to rebuild our local QuadTree every step, but now each
+		// worker only builds the QuadTree containing the particles it has been assigned
+		QuadTree tree;
+		QuadTree::buildQuadTree(localParticles, tree);
+
+		//std::cerr << "completed building tree, rank = " << rank << std::endl;
+
+		const auto task = Task{0, myAcreParticles.size()};
+		//simulateStepXD(tree, task, myAcreParticles.data(), myAcreParticlesOut.data(), parameters);
+
+		const auto& specializationToUse = options.numIterations > NUMERICAL_INSTABILITY_THRESHOLD
+			? specializedFunctions[specialization]
+			: specializedFunctionsDangerous[specialization];
+		specializationToUse(tree, task, myAcreParticles.data(), myAcreParticlesOut.data(), parameters);
+	    // else {
+		// 	simulateStep<true, false>(tree, task, myAcreParticles.data(), myAcreParticlesOut.data(), parameters);
+		// }
+
+		//std::cerr << "completed simulating step, rank = " << rank << std::endl;
+
+		std::vector<int> sizes(nproc), displacements(nproc);
+		const auto numParticles = static_cast<std::size_t>(options.numParticles);
+		for(auto j = 0ul, offset = 0ul; j < nproc; j++) {
+			sizes[j] = acreCounts[j] * sizeof(Particle);
+			displacements[j] = static_cast<int>(offset);
+			offset += sizes[j];
+		}
+
+		if(((i + 1) % GRID_UPDATE_REGULARITY == 0) || (i == options.numIterations - 1))
+		{
+			if(i == options.numIterations - 1)
+			{
+				std::sort(myAcreParticlesOut.begin(), myAcreParticlesOut.end(), [](Particle const& a, Particle const& b)
+					{ 
+						return a.id < b.id; 
+					});
+			}
+			MPI_Barrier(MPI_COMM_WORLD);
+			MPI_Allgatherv(myAcreParticlesOut.data(), sizes[rank], MPI_BYTE, particleDump.data(), sizes.data(), displacements.data(),
+						   MPI_BYTE, MPI_COMM_WORLD);
+		}
+		//std::cerr << "completed iter i = " << i << ", rank = " << rank << std::endl;
+	}
+
+	printf("All work completed as pid=%d\n", rank);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    printf("Passed barrier as pid=%d\n", rank);
+	
+    if(rank == MANAGER_PID)
+	{		
+		std::sort(particleDump.begin(), particleDump.end(), [](Particle const& a, Particle const& b)
+			{ 
+				return a.id < b.id; 
+			});
+
+		printf("total simulation time: %.6fs\n", totalSimulationTimer.elapsed());
+		
+        std::ofstream f(options.outputFile);
+        assert((bool) f && "Cannot open output file");
+
+        f << std::setprecision(9);
+
+		//std::cerr << "printing aprticles to file, part dump size = " << particleDump.size() << std::endl;
+		//const auto& p = particleDump[0];
+		// std::cerr << p.mass << " " << p.position.x << " " << p.position.y << " " << p.velocity.x << " " << p.velocity.y
+		// 		  << std::endl;
+        for (auto i = 0ul; i < particleDump.size(); i++)
+		{
+			//const auto& p = particleDump[particleSortingMap[i]];
+			const auto& p = particleDump[i];
+            f << p.mass << " " << p.position.x << " " << p.position.y << " " << p.velocity.x << " " << p.velocity.y
+              << std::endl;
+        }
+        assert((bool) f && "Failed to write to output file");
+
+        //shmctl(particleShmId, IPC_RMID, nullptr);
+    }
+}
+
+template<bool useLoadBalancing>
+void solve(const int rank, const int nproc, const StartupOptions& options)
+{
+    constexpr auto NUMERICAL_INSTABILITY_THRESHOLD = 10; // num iterations before we start caring about instability
+    const auto parameters = getBenchmarkStepParams(options.spaceSize);
+    std::vector<Particle> particleDump, newParticles;
+    auto particleShmId{0};
+    auto taskListCounterShmId{0};
+    key_t particleShmKey{1337};
+    key_t taskListShmKey{7331};
+    std::atomic_size_t* taskListIndexPtr{nullptr};
+    Particle* particles{nullptr};
+    auto particleSortingMap = std::unordered_map<int, int>{};
+    const auto N = parameters.cullRadius / 1.25f;
+    const auto specialization = static_cast<int>(std::round(parameters.cullRadius / 1.25f));
+    const auto canSpecializeCullRadius = specializedFunctions.find(N) != specializedFunctions.end();
+    const auto canSpecializeDeltaTime = parameters.deltaTime == 0.2f;
+
+    // Don't bother with load-balanced solutions if it's going to be effectively sequential
+    // TODO: can try to do work on pid0
+    if (nproc <= 2 && useLoadBalancing) {
+        return solve<false>(rank, nproc, options);
+    }
+
+    if (rank == MANAGER_PID) {
+        loadFromFile(options.inputFile, particleDump); // TODO: check if this gets mapped to huge page, then bench
+        auto indexed = std::vector<std::pair<Particle, int>>();
+
+        for (auto i = 0ul; i < particleDump.size(); i++) {
+            indexed.emplace_back(particleDump[i], i);
+        }
+
+        QuadTree tree;
+        QuadTree::buildQuadTree(particleDump, tree);
+        const auto swapOrder = (tree.bmax.x - tree.bmin.x) <= (tree.bmax.y - tree.bmin.y);
+
+        // TODO: uncomment
+        std::sort(indexed.begin(), indexed.end(), [&tree, swapOrder, N](const auto& l, const auto& r) {
+            const auto& a = l.first;
+            const auto& b = r.first;
+
+            const auto ax = toInt(N * a.position.x, tree.bmin.x, tree.bmin.x);
+            const auto ay = toInt(N * a.position.y, tree.bmin.y, tree.bmin.y);
+            const auto bx = toInt(N * b.position.x, tree.bmin.x, tree.bmin.x);
+            const auto by = toInt(N * b.position.y, tree.bmin.y, tree.bmin.y);
+
+            const auto az = swapOrder ? interleaveBits(ax, ay) : interleaveBits(ay, ax);
+            const auto bz = swapOrder ? interleaveBits(bx, by) : interleaveBits(by, bx);
+
+            return az < bz;
+        });
+
+        for (auto i = 0ul; i < particleDump.size(); i++) {
+            particleDump[i] = indexed[i].first;
+            particleSortingMap[indexed[i].second] = i;
+        }
+
+        const auto SHM_SIZE = particleDump.size() * sizeof(Particle); // Size of the shared memory segment
+
+        // TODO: remove
+        if constexpr (useLoadBalancing) {
+            assert(nproc > 2);
+        }
+        particleShmId = shmget(particleShmKey, SHM_SIZE, IPC_CREAT | 0666);
+        if (particleShmId < 0) {
+            perror("shmget");
+            exit(1);
+        }
+        particles = static_cast<Particle*>(shmat(particleShmId, nullptr, 0));
+        if ((void*) particles == (void*) -1) {
+            perror("shmat");
+            exit(1);
+        }
+
+        // TODO: change shmsize
+        taskListCounterShmId = shmget(taskListShmKey, sizeof(std::atomic_size_t), IPC_CREAT | 0666);
+        if (taskListCounterShmId < 0) {
+            perror("shmget");
+            exit(1);
+        }
+
+        taskListIndexPtr = static_cast<std::atomic_size_t*>(shmat(taskListCounterShmId, nullptr, 0));
+        if ((void*) taskListIndexPtr == (void*) -1) {
+            perror("shmat");
+            exit(1);
+        }
+
+        *taskListIndexPtr = 0;
+    }
+
+    // broadcast the shm ids to everything
+    MPI_Bcast(&particleShmId, 1, MPI_INT, MANAGER_PID, MPI_COMM_WORLD);
+    MPI_Bcast(&taskListCounterShmId, 1, MPI_INT, MANAGER_PID, MPI_COMM_WORLD);
+
+    if (rank != MANAGER_PID) {
+        particles = static_cast<Particle*>(shmat(particleShmId, nullptr, 0));
+        if ((void*) particles == (void*) -1) {
+            perror("shmat");
+            exit(1);
+        }
+
+        taskListIndexPtr = static_cast<std::atomic_size_t*>(shmat(taskListCounterShmId, nullptr, 0));
+        if ((void*) taskListIndexPtr == (void*) -1) {
+            perror("shmat");
+            exit(1);
+        }
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == MANAGER_PID) {
+        std::memcpy(particles, particleDump.data(), particleDump.size() * sizeof(Particle));
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    particleDump.resize(options.numParticles);
+    std::memcpy(particleDump.data(), particles, options.numParticles * sizeof(Particle));
+
+    // from the tutorials we're linked in the pdf & told to ref https://hpc-tutorials.llnl.gov/mpi/examples/mpi_heat2D.c
+    std::vector<int> sizes(nproc), displacements(nproc);
+    if constexpr (!useLoadBalancing) {
+        const auto numParticles = static_cast<std::size_t>(options.numParticles);
+        for (auto i = 0ul, offset = 0ul, averow = numParticles / nproc, extra = numParticles % nproc;
+             i < static_cast<unsigned>(nproc); i++) {
+            sizes[i] = (averow + (i < extra)) * sizeof(Particle);
+            displacements[i] = static_cast<int>(offset);
+            offset += sizes[i];
+        }
+        newParticles.resize(sizes[rank] / sizeof(Particle));
+    }
+
+    Timer totalSimulationTimer;
+
+    // TODO: Ideally, replace this with a lockless queue and don't have to worry about a manager. That's part of where
+    // we end up losing so much speed.
+    //
+    for (int i = 0; i < options.numIterations; i++) {
+        if constexpr (useLoadBalancing) {
+            constexpr auto SCALING_FACTOR = 4;
+
+            const auto numParticles = static_cast<std::size_t>(options.numParticles);
+            const auto chunkSize = std::min(numParticles, numParticles / (SCALING_FACTOR * nproc));
+            const auto totalChunks = numParticles / chunkSize;
+
+            while (true) {
+                QuadTree tree;
+                QuadTree::buildQuadTree(particleDump, tree);
+
+                const auto taskIdx = std::atomic_fetch_add(taskListIndexPtr, 1);
+
+                if (taskIdx > totalChunks) {
+                    break;
+                }
+
+                const auto task = Task{taskIdx * chunkSize, std::min(numParticles, (taskIdx + 1) * chunkSize)};
+
+                if (canSpecializeDeltaTime && canSpecializeCullRadius) {
+                    const auto& specializationToUse = options.numIterations > NUMERICAL_INSTABILITY_THRESHOLD
+                                                              ? specializedFunctions[specialization]
+                                                              : specializedFunctionsDangerous[specialization];
+                    specializationToUse(tree, task, /* in */ particleDump.data(),
+                                        /* out */ particles, parameters);
+                } else {
+                    simulateStep<true, false>(tree, task, /* in */ particleDump.data(), /* out */ particles,
+                                              parameters);
+                }
+            }
+
+            // Post-iteration, set particleDump = particles
+            MPI_Barrier(MPI_COMM_WORLD);
+            std::atomic_store(taskListIndexPtr, 0);
+            std::memcpy(particleDump.data(), particles, particleDump.size() * sizeof(Particle));
+            MPI_Barrier(MPI_COMM_WORLD);
+            // end if constexpr
+        } else {
+            MPI_Barrier(MPI_COMM_WORLD);
+            QuadTree tree;
+            QuadTree::buildQuadTree(particleDump, tree);
+            const auto task = Task{static_cast<std::size_t>(displacements[rank] / sizeof(Particle)),
+                                   (displacements[rank] + sizes[rank]) / sizeof(Particle)};
+            if (canSpecializeCullRadius && canSpecializeDeltaTime) {
+                const auto& specializationToUse = options.numIterations > NUMERICAL_INSTABILITY_THRESHOLD
+                                                          ? specializedFunctions[specialization]
+                                                          : specializedFunctionsDangerous[specialization];
+                specializationToUse(tree, task, /* in */ particleDump.data(), /* out */ particles, parameters);
+            } else {
+                simulateStep<true, false>(tree, task, /* in */ particleDump.data(), /* out */ particles, parameters);
+            }
+            MPI_Barrier(MPI_COMM_WORLD);
+            // We also have a version that uses allgatherv on our repository if you would want to see that.
+            std::memcpy(particleDump.data(), particles, particleDump.size() * sizeof(Particle));
+        }
+    }
+
+    printf("All work completed as pid=%d\n", rank);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    printf("Passed barrier as pid=%d\n", rank);
+
+    if (rank == MANAGER_PID) {
+        printf("total simulation time: %.6fs\n", totalSimulationTimer.elapsed());
+
+        std::ofstream f(options.outputFile);
+        assert((bool) f && "Cannot open output file");
+
+        f << std::setprecision(9);
+        for (auto i = 0ul; i < particleDump.size(); i++) {
+            const auto& p = particleDump[particleSortingMap[i]];
+            f << p.mass << " " << p.position.x << " " << p.position.y << " " << p.velocity.x << " " << p.velocity.y
+              << std::endl;
+        }
+        assert((bool) f && "Failed to write to output file");
+
+        shmctl(particleShmId, IPC_RMID, nullptr);
+        shmctl(taskListCounterShmId, IPC_RMID, nullptr);
+    }
+}
+
+int main(int argc, char* argv[])
+{
+    int pid, nproc;
+    initializeMPI(argc, argv, pid, nproc);
+    initializeSpecializedSimulateSteps();
+	
+    const auto options = parseOptions(argc, argv);
+
+	if(options.numParticles <= 100000)
+	{
+		if(options.loadBalance)
+		{
+			solve<true>(pid, nproc, options);
+		}
+		else
+		{
+			solve<false>(pid, nproc, options);
+		}
+	}
+	else
+	{
+		solveAjax(pid, nproc, options);
+	}
+	
+    // if(options.loadBalance)
+	// {
+    //     solve<true>(pid, nproc, options);
+    // }
+	// else
+	// {
+    //     solve<false>(pid, nproc, options);
+    // }
+
+	finalizeMPI();
+	
     return 0;
 }

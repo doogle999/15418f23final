@@ -10,7 +10,7 @@ int main(int argc, char** argv)
 	{
 		return -1;
 	}
-
+	
 	if(compare(argv[1], "hello") >= 0)
 	{
 		if(compare(argv[1], "zaz") >= 0)
