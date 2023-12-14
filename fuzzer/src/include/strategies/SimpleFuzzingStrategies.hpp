@@ -1,8 +1,10 @@
 #pragma once
 
-#include "strategies/AbstractFuzzingStrategy.hpp"
 #include <limits>
+#include <random>
 #include <type_traits>
+
+#include "strategies/AbstractFuzzingStrategy.hpp"
 
 namespace FuzzingStrategies {
     AbstractFuzzingStrategy MinEverythingStrategy = [](std::uint8_t* memory, std::size_t memorySize) {
@@ -21,4 +23,12 @@ namespace FuzzingStrategies {
             memory[i] = MAX_VALUE;
         }
     };
-} // namespace Strategies
+    AbstractFuzzingStrategy RandomizedStrategy = [](std::uint8_t* memory, std::size_t memorySize) {
+        static constexpr auto RANDOM_NUMBER_GENERATOR_SEED = 1337;
+        static std::mt19937 callableRandomNumberGenerator{RANDOM_NUMBER_GENERATOR_SEED};
+
+        for (auto i = 0; i < memorySize; i++) {
+            memory[i] = callableRandomNumberGenerator();
+        }
+    };
+} // namespace FuzzingStrategies
