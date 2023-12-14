@@ -38,7 +38,7 @@ typedef struct State
 //     printf("---------------------------------------------------------\n");
 // }
 
-__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint32_t memorySize, uint32_t programSize)
+__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint8_t* program, uint32_t memorySize, uint32_t programSize)
 {
 	// Normally this is the destination register, but in S and B type instructions
 	// where there is not destination register these same bits communicate parts of an immediate
@@ -162,41 +162,62 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			}
 			// funct3 again
 			uint32_t memOffset = (state->x[rs1] + imm);
-			// TODO: we're halfway to supporting function pointers, but not there yet:
-			// need to adjust 
-			switch((inst >> 12) & 0x7)
+
+			uint32_t funct3 = (inst >> 12) & 0x7;
+			uint32_t extra = 0;
+			switch(funct3)
+			{
+				case 0x0: { extra = 0; break; }
+				case 0x1: { extra = 1; break; }
+				case 0x2: { extra = 3; break; }
+				case 0x4: { extra = 0; break; }
+				case 0x5: { extra = 1; break; }
+			}
+
+			if(memOffset + extra >= memorySize)
+			{
+				// ERROR
+				break;
+			}
+			uint8_t* basePtr = memory;
+			if(memOffset < programSize)
+			{
+				if(memOffset + extra >= programSize)
+				{
+					// ERROR, going across regions
+					break;
+				}
+				basePtr = program;
+			}
+			
+			switch(funct3)
 			{
 				case 0x0: // lb
 				{
-					if(memOffset >= memorySize /* || memOffset <= programSize */) { break; }
-					uint8_t loaded = *(uint8_t*)(memory + memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
 					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
 					break;
 				}
 				case 0x1: // lh
 				{
-					if((memOffset + 1) >= memorySize /* || memOffset <= programSize */) { break; }
-					uint16_t loaded = *(uint16_t*)(memory + memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
 					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
 					break;
 				}
 				case 0x2: // lw
 				{
-					if((memOffset + 3) >= memorySize /* || memOffset <= programSize */) { break; }
-					state->x[rd] = *(uint32_t*)(memory + memOffset);
+					state->x[rd] = *(uint32_t*)(basePtr + memOffset);
 					break;
 				}
 				case 0x4: // lbu
 				{
-					if(memOffset >= memorySize /* || memOffset <= programSize */) { break; }
-					uint8_t loaded = *(uint8_t*)(memory + memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
 					state->x[rd] = loaded & 0x000000ff;
 					break;
 				}
 				case 0x5: // lhu
 				{
-					if((memOffset + 1) >= memorySize /* || memOffset <= programSize */) { break; }
-					uint16_t loaded = *(uint16_t*)(memory + memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
 					state->x[rd] = loaded & 0x0000ffff;
 					break;
 				}
