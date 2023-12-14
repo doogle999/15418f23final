@@ -1,6 +1,6 @@
 int checkIfGood(int x)
 {
-	return x == 2;
+	return x == 3;
 }
 
 int compare(char const* a, char const* b)
@@ -11,14 +11,19 @@ int compare(char const* a, char const* b)
 
 int main(int argc, char** argv)
 {
-    int outbuffer[3];
+    int outbuffer[4];
+
+	char word[4] = {65, 66, 67, 0};
 	
 	if(!checkIfGood(argc))
 	{
 		return 1;
 	}
 
-	char word[4] = {65, 66, 67, 0};
+	if(compare(argv[2], "word"))
+	{
+		outbuffer[4] = 0xaaaaaaaa;
+	}
 
 	if(compare(argv[1], "123") == 0)
 	{
@@ -33,5 +38,5 @@ int main(int argc, char** argv)
 		outbuffer[2] = 3;
 	}
 
-	return 0;
+	return outbuffer[0] + outbuffer[1] + outbuffer[2];
 }
