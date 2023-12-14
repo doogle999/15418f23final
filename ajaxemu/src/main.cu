@@ -543,7 +543,7 @@ int main(int argc, char** argv)
 		// Can't use stpcpy because we need to know size before hand because we are storing "backwards" because we only know
 		// Higher address because stack grows down
 		uint32_t tempLength = strlen(argv[i + 2]) + 1;
-	    argvSubjOffsets[i] = tempLength + argvSubjOffsets[0];
+	    argvSubjOffsets[i] = tempLength + argvSubjOffsets[i - 1];
 		if(argvSubjOffsets[i] > MEMORY_SIZE)
 		{
 			printf("MEMORY_SIZE insufficient to store arg strings for subject program\n");
