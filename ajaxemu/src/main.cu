@@ -641,14 +641,14 @@ int main(int argc, char** argv)
 	cudaDeviceSynchronize();
 
 	// Print results
-	Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
-	cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+	// Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
+	// cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
 
-	for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
-	{
-		printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
-	}
-	free(localResults);
+	// for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
+	// {
+	// 	printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
+	// }
+	// free(localResults);
 
 	// Printing memory dumps
 	//cudaMemcpy(memory, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
