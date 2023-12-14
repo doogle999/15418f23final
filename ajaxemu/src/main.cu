@@ -14,6 +14,12 @@ typedef struct State
     uint32_t x[32];
 } State;
 
+typedef struct Result
+{
+    int32_t returnVal;
+    int32_t errorCode;
+} Result;
+
 // void setup()
 // {
 //     int deviceCount = 0;
@@ -38,7 +44,7 @@ typedef struct State
 //     printf("---------------------------------------------------------\n");
 // }
 
-__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint8_t* program, uint32_t memorySize, uint32_t programSize)
+__device__ __inline__ int executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint8_t* program, uint32_t memorySize, uint32_t programSize)
 {
 	// Normally this is the destination register, but in S and B type instructions
 	// where there is not destination register these same bits communicate parts of an immediate
@@ -185,16 +191,16 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			
 			if(memOffset + extra >= memorySize)
 			{
-				// ERROR
-				break;
+			    state->x[0] = -2;
+			    return;
 			}
 			uint8_t* basePtr = memory;
 			if(memOffset < programSize)
 			{
 				if(memOffset + extra >= programSize)
 				{
-					// ERROR, going across regions
-					break;
+					state->x[0] = -1;
+					return;
 				}
 				basePtr = program;
 			}
@@ -437,13 +443,17 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 	{
 		state->x[rd] = 0;
 	}
+
+	return 0;
 }
 
-__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry)
+__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry, Result* globalResults, uint32_t maxOps)
 {
     uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
 
 	uint8_t* memory = globalMemory + (memorySize * index);
+
+	Result* myResults = globalResults + index;
 
 	State state;
 
@@ -470,19 +480,20 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 // printf("argv[2] = %s\n", (memory + *(uint32_t*)(memory + (argv + 8))));
 
 	int count = 0;
-	while(count < 1000)
+	while(count < maxOps)
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
-		printf("executing instruction: %08x\n", inst);
-	    executeInstruction(&state, inst, memory, program, memorySize, programSize);
-		printf("pc = %u\n", state.pc);
-		if(state.pc == DONE_ADDRESS_CUDA)
+		//printf("executing instruction: %08x\n", inst);
+		//printf("pc = %u\n", state.pc);
+		if(executeInstruction(&state, inst, memory, program, memorySize, programSize) || state.pc == DONE_ADDRESS_CUDA)
 		{
 			break;
 		}
 		count++;
 	}
-	printf("return value: (as an int): %d\n", (int32_t)state.x[10]);
+
+	myResults->returnVal = state.x[10];
+	myResults->errorCode = state.x[0]; // If we have an error, just write to x[0] and self destruct out of the loop
 }
 
 // TODO
@@ -499,8 +510,14 @@ int main(int argc, char** argv)
         return 1;
     }
 
+	// Make this way larger than it really needs to be because otherwise it can get accidentally clobbered by program
+	// taking up the same mem space, don't have time to fix
+	dim3 blockDim(256);
+	dim3 gridDim(32);
+
     uint32_t const MEMORY_SIZE = 4 * 256; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
-	uint32_t const INSTANCE_COUNT = 4;
+	uint32_t const INSTANCE_COUNT = blockDim.x * gridDim.x;
+	uint32_t const MAX_OPS = 10000;
 
 	// First step: program instructions
 	// Reading the program instructions into a buffer
@@ -603,13 +620,18 @@ int main(int argc, char** argv)
 	free(argvSubjOffsets);
 	// Should now have both program and memory images on the device
 
-	// TODO fix this later
-	dim3 blockDim(INSTANCE_COUNT);
-	dim3 gridDim(1);
-
 	uint32_t entryPoint = (uint32_t)strtol(argv[2], NULL, 16);
-	
-	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint);
+
+	// Oh, and we have to set up a place for return values + important codes
+    Result* deviceResultImage;
+	cudaError_t mallocResultImageError = cudaMalloc(&deviceResultImage, INSTANCE_COUNT * sizeof(Result));
+	if(mallocResultImageError != cudaSuccess)
+	{
+		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocResultImageError));
+		return 1;
+	}
+
+	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS);
 
 	cudaError_t errorCode = cudaPeekAtLastError();
 	if(errorCode != cudaSuccess)
@@ -618,25 +640,36 @@ int main(int argc, char** argv)
 	}
 	cudaDeviceSynchronize();
 
-	cudaMemcpy(memory, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+	// Print results
+	Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
+	cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
 
-	uint32_t const BYTES_PER_LINE = 4 * 4;
-	for(uint32_t j = 0; j < INSTANCE_COUNT; j++)
+	for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
 	{
-		for(uint32_t i = 0; i < MEMORY_SIZE - programSize; i += 1)
-		{
-			if(MEMORY_SIZE - i == stackStart)
-			{
-				printf("\n");
-			}
-			if(i % BYTES_PER_LINE == 0)
-			{
-				printf("\n");
-			}
-			printf("%02x ", *(uint8_t*)(memory + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
-		}
-		printf("\n");
+		printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
 	}
+	free(localResults);
+
+	// Printing memory dumps
+	//cudaMemcpy(memory, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+
+	// uint32_t const BYTES_PER_LINE = 4 * 4;
+	// for(uint32_t j = 0; j < INSTANCE_COUNT; j++)
+	// {
+	// 	for(uint32_t i = 0; i < MEMORY_SIZE - programSize; i += 1)
+	// 	{
+	// 		if(MEMORY_SIZE - i == stackStart)
+	// 		{
+	// 			printf("\n");
+	// 		}
+	// 		if(i % BYTES_PER_LINE == 0)
+	// 		{
+	// 			printf("\n");
+	// 		}
+	// 		printf("%02x ", *(uint8_t*)(memory + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
+	// 	}
+	// 	printf("\n");
+	// }
 	
 	cudaFree(deviceProgramImage);
 	cudaFree(deviceMemoryImage);
