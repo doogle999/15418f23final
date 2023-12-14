@@ -13,15 +13,21 @@ void AVX512Backend::run() {
         emitInstruction(Instruction{reinterpret_cast<Instruction*>(program)[i]});
     }
 
-    spdlog::info("Trying to open output file for writing.");
-    auto output = std::ofstream("jitoutput.dmp", std::ios::out | std::ios::binary | std::ios::trunc);
+    spdlog::info("Trying to open output files for writing.");
+    auto hexOutput = std::ofstream("jitoutput.dmp", std::ios::out | std::ios::binary | std::ios::trunc);
+    auto rawOutput = std::ofstream("jitoutput.dmp.raw", std::ios::out | std::ios::binary | std::ios::trunc);
 
-    if (!output) {
+    if (!hexOutput) {
         spdlog::error("Could not open jitoutput.dmp for writing!");
         exit(EXIT_FAILURE);
     }
 
-    spdlog::info("Opened output file for writing!");
+    if (!hexOutput) {
+        spdlog::error("Could not open jitoutput.dmp for writing!");
+        exit(EXIT_FAILURE);
+    }
+
+    spdlog::info("Opened output files for writing!");
 
     spdlog::info("Getting text section.");
     const auto text = code.textSection();
@@ -31,16 +37,21 @@ void AVX512Backend::run() {
     const auto textCode = text->data();
 
     for (auto i = 0ull; i < textSize; i++) {
-        output << std::format("{:02x}", textCode[i]);
+        hexOutput << std::format("{:02x}", textCode[i]);
+        hexOutput << textCode[i];
     }
 
-    asmjit::String encodedOpcode;
-    encodedOpcode.appendHex(text->data(), text->bufferSize());
-    spdlog::info("Dump (their way): {}", encodedOpcode.data());
 
-    output << '\n';
+    // This alternative approach was ripped from an asmjit test. Very cute API.
+    {
+        asmjit::String encodedOpcode;
+        encodedOpcode.appendHex(text->data(), text->bufferSize());
+        spdlog::info("Dump (their way): {}", encodedOpcode.data());
+    }
 
-    output.close();
+    hexOutput << '\n';
+    hexOutput.close();
+    rawOutput.close();
 }
 
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
