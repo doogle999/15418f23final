@@ -13,7 +13,7 @@ int main(int argc, char** argv)
 {
     int outbuffer[3];
 	
-	if(checkIfGood(argc))
+	if(!checkIfGood(argc))
 	{
 		return 1;
 	}
