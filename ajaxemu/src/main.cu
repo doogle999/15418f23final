@@ -83,7 +83,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				imm |= 0xffe00000;
 			}
-			state->pc += imm;
+			state->pc += (int32_t)imm;
 			break;
 		}
 		case 0x67: // jalr
@@ -97,7 +97,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				imm |= 0xfffff000;
 			}
-			state->pc = (state->x[rs1] + imm) & ~1;
+			state->pc = (state->x[rs1] + (int32_t)imm) & ~1;
 			state->x[rd] = temp;
 			break;
 		}
@@ -118,32 +118,32 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // beq
 				{
-					if(state->x[rs1] == state->x[rs2]) { state->pc += imm; }
+					if(state->x[rs1] == state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				case 0x1: // bne
 				{
-					if(state->x[rs1] != state->x[rs2]) { state->pc += imm; }
+					if(state->x[rs1] != state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				case 0x4: // blt (this is signed)
 				{
-					if((int32_t)state->x[rs1] < (int32_t)state->x[rs2]) { state->pc += imm; }
+					if((int32_t)state->x[rs1] < (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				case 0x5: // bge (this is signed)
 				{
-					if((int32_t)state->x[rs1] >= (int32_t)state->x[rs2]) { state->pc += imm; }
+					if((int32_t)state->x[rs1] >= (int32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				case 0x6: // bltu (this is unsigned)
 				{
-					if((uint32_t)state->x[rs1] < (uint32_t)state->x[rs2]) { state->pc += imm; }
+					if((uint32_t)state->x[rs1] < (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				case 0x7: // bgeu (this is unsigned)
 				{
-					if((uint32_t)state->x[rs1] >= (uint32_t)state->x[rs2]) { state->pc += imm; }
+					if((uint32_t)state->x[rs1] >= (uint32_t)state->x[rs2]) { state->pc += (int32_t)imm; }
 					break;
 				}
 				// TODO: handle if it isn't one of these? Set trap maybe?
@@ -194,30 +194,30 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // lb
 				{
-					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + (int32_t)memOffset);
 					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
 					break;
 				}
 				case 0x1: // lh
 				{
-					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + (int32_t)memOffset);
 					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
 					break;
 				}
 				case 0x2: // lw
 				{
-					state->x[rd] = *(uint32_t*)(basePtr + memOffset);
+					state->x[rd] = *(uint32_t*)(basePtr + (int32_t)memOffset);
 					break;
 				}
 				case 0x4: // lbu
 				{
-					uint8_t loaded = *(uint8_t*)(basePtr + memOffset);
+					uint8_t loaded = *(uint8_t*)(basePtr + (int32_t)memOffset);
 					state->x[rd] = loaded & 0x000000ff;
 					break;
 				}
 				case 0x5: // lhu
 				{
-					uint16_t loaded = *(uint16_t*)(basePtr + memOffset);
+					uint16_t loaded = *(uint16_t*)(basePtr + (int32_t)memOffset);
 					state->x[rd] = loaded & 0x0000ffff;
 					break;
 				}
