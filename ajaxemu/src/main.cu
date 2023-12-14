@@ -479,7 +479,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    uint32_t const MEMORY_SIZE = 4 * 64; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
+    uint32_t const MEMORY_SIZE = 4 * 256; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
 	uint32_t const INSTANCE_COUNT = 4;
 
 	// First step: program instructions
