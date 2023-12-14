@@ -38,7 +38,7 @@ void AVX512Backend::run() {
 
     for (auto i = 0ull; i < textSize; i++) {
         hexOutput << std::format("{:02x}", textCode[i]);
-        hexOutput << textCode[i];
+        rawOutput << textCode[i];
     }
 
 
