@@ -22,7 +22,7 @@ int main(int argc, char** argv)
 
 	if(compare(argv[2], "word"))
 	{
-		outbuffer[4] = 0xaaaaaaaa;
+		outbuffer[3] = 0xaaaaaaaa;
 	}
 
 	if(compare(argv[1], "123") == 0)
