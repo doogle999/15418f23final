@@ -605,7 +605,7 @@ int main(int argc, char** argv)
 	uint32_t const BYTES_PER_LINE = 4 * 4;
 	for(uint32_t j = 0; j < INSTANCE_COUNT; j++)
 	{
-		for(uint32_t i = 0; i < MEMORY_SIZE; i += 1)
+		for(uint32_t i = 0; i < MEMORY_SIZE - programSize; i += 1)
 		{
 			if(i % BYTES_PER_LINE == 0)
 			{
