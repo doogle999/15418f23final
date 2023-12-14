@@ -455,7 +455,7 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
 		printf("executing instruction: %08x\n", inst);
-	    executeInstruction(&state, inst, memory, memorySize, programSize);
+	    executeInstruction(&state, inst, memory, program, memorySize, programSize);
 		printf("pc = %u\n", state.pc);
 		if(state.pc == DONE_ADDRESS_CUDA)
 		{
