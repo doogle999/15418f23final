@@ -529,6 +529,7 @@ int main(int argc, char** argv)
 		printf("Failed to allocate enough memory for the emulator.\n");
 		return 1;
 	}
+	memset(memory, 0, MEMORY_SIZE * INSTANCE_COUNT);
 	// For now, we're literally just going to pass through arguments from our actual call of this program.
 	// So argv[3..] correspond to argv[1..] in the subject program and argv[1] in our program is argv[0] in subject
 	int32_t argcSubj = argc - 2;
