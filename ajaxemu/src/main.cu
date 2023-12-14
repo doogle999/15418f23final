@@ -161,7 +161,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				imm |= 0xfffff000;
 			}
 			// funct3 again
-			int32_t memOffset = (state->x[rs1] + (int32_t)imm);
+			uint32_t memOffset = (state->x[rs1] + (int32_t)imm);
 
 			uint32_t funct3 = (inst >> 12) & 0x7;
 			uint32_t extra = 0;
@@ -174,6 +174,8 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				case 0x5: { extra = 1; break; }
 			}
 
+			printf("memOffset, extra, %u, %u\n", memOffset, extra);
+			
 			if(memOffset + extra >= memorySize)
 			{
 				// ERROR
@@ -241,17 +243,17 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // sb
 				{
-					*(uint8_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
+					*(uint8_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				case 0x1: // sh
 				{
-					*(uint16_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
+					*(uint16_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				case 0x2: // sw
 				{
-					*(uint32_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
+					*(uint32_t*)(memory + (uint32_t)(state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				// TODO: handle default?
@@ -561,7 +563,7 @@ int main(int argc, char** argv)
 	for(int32_t i = 0; i < argcSubj; i++)
 	{
 		// All programs see their memory as offset relative to their own memory chunk so this is ok to copy
-		*(uint32_t*)(memory + (MEMORY_SIZE - argvArrayEnd - (4 * (i + 1)))) = MEMORY_SIZE - argvSubjOffsets[argcSubj - i];
+		*(uint32_t*)(memory + (MEMORY_SIZE - argvArrayEnd - (4 * (i + 1)))) = MEMORY_SIZE - argvSubjOffsets[argcSubj - i - 1];
 	}
 	// Now all args are copied to the first instances host memory, so we copy them to all the instances
 	uint32_t stackStart = MEMORY_SIZE - (argvArrayEnd + (argcSubj * 4)); // Remember, starting stack pointer value is not usable immediately, dec first, so this ok
