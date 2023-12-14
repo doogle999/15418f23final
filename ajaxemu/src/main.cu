@@ -8,6 +8,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <chrono>
+
 typedef struct State
 {
     uint32_t pc;
@@ -498,6 +500,11 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 		count++;
 	}
 
+	// if(index % 1000 == 0)
+	// {
+	// 	printf("my word was \"%s\" and i completed in %d cycles\n", (memory + *(uint32_t*)(memory + (argv + 4))), count);
+	// }
+
 	myResults->returnVal = state.x[10];
 	myResults->errorCode = state.x[0]; // If we have an error, just write to x[0] and self destruct out of the loop
 }
@@ -513,7 +520,7 @@ int main(int argc, char** argv)
 	// Make this way larger than it really needs to be because otherwise it can get accidentally clobbered by program
 	// taking up the same mem space, don't have time to fix
 	dim3 blockDim(256);
-	dim3 gridDim(16);
+	dim3 gridDim(32);
 
     uint32_t const MEMORY_SIZE = 4 * 1024; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
 	uint32_t const INSTANCE_COUNT = blockDim.x * gridDim.x;
@@ -602,11 +609,18 @@ int main(int argc, char** argv)
 	}
 	// Now all args are copied to the first instances host memory, so we copy them to all the instances
 	uint32_t stackStart = MEMORY_SIZE - (argvArrayEnd + (argcSubj * 4)); // Remember, starting stack pointer value is not usable immediately, dec first, so this ok
+	char randBuf[4];
+	randBuf[3] = '\0';
+	srand(15418);
 	for(uint32_t i = 1; i < INSTANCE_COUNT; i++)
 	{
 		// Make sure memory size is big enough or problems will happen
 		memcpy(memory + ((MEMORY_SIZE * i) + stackStart), memory + stackStart, MEMORY_SIZE - stackStart);
-		strncpy((char*)(memory + (MEMORY_SIZE * i) + (MEMORY_SIZE - argvSubjOffsets[1])), rand
+
+		randBuf[0] = (rand() % 26) + 97;
+		randBuf[1] = (rand() % 26) + 97;
+		randBuf[2] = (rand() % 26) + 97;
+		strncpy((char*)(memory + (MEMORY_SIZE * i) + (MEMORY_SIZE - argvSubjOffsets[1])), randBuf, (argvSubjOffsets[1] - argvSubjOffsets[0]));
 	}
 	// Finally can copy all of them to device... a little wasteful, since much of this will be zeroes, but I figure better than many small calls
 	// could theoretically seperate these regions of memory but would require complex redirect system on emulator memory system...
@@ -642,6 +656,7 @@ int main(int argc, char** argv)
 	}
 	cudaMemset(deviceBranchDataImage, 0, sizeof(BranchData) * (programInstCount));
 
+	auto startTime = std::chrono::high_resolution_clock::now();
 	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS, deviceBranchDataImage);
 
 	cudaError_t errorCode = cudaPeekAtLastError();
@@ -651,15 +666,19 @@ int main(int argc, char** argv)
 	}
 	cudaDeviceSynchronize();
 
-	// Print results
-	Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
-	cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+	auto finishTime = std::chrono::high_resolution_clock::now();
 
-	for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
-	{
-		printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
-	}
-	free(localResults);
+	printf("Kernel took %lu us\n", std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count());
+
+	// Print results
+	// Result* localResults = (Result*)malloc(INSTANCE_COUNT * sizeof(Result));
+	// cudaMemcpy(localResults, deviceResultImage, sizeof(Result) * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
+
+	// for(uint32_t i = 0; i < INSTANCE_COUNT; i++)
+	// {
+	// 	printf("Instance %u: return %d, errorCode %d\n", i, localResults[i].returnVal, localResults[i].errorCode);
+	// }
+	// free(localResults);
 
     BranchData* localBranchData = (BranchData*)malloc(programInstCount * sizeof(BranchData));
 	cudaMemcpy(localBranchData, deviceBranchDataImage, sizeof(BranchData) * programInstCount, cudaMemcpyDeviceToHost);
