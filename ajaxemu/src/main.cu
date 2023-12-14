@@ -11,35 +11,32 @@
 typedef struct State
 {
     uint32_t pc;
-
     uint32_t x[32];
 } State;
 
-#define MEMORY_SIZE 256
+// void setup()
+// {
+//     int deviceCount = 0;
+//     std::string name;
+//     cudaError_t err = cudaGetDeviceCount(&deviceCount);
 
-void setup()
-{
-    int deviceCount = 0;
-    std::string name;
-    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+//     printf("---------------------------------------------------------\n");
+//     printf("Initializing CUDA for Cuda Fuzzer\n");
+//     printf("Found %d CUDA devices\n", deviceCount);
 
-    printf("---------------------------------------------------------\n");
-    printf("Initializing CUDA for Cuda Fuzzer\n");
-    printf("Found %d CUDA devices\n", deviceCount);
+//     for(int i = 0; i < deviceCount; i++)
+// 	{
+//         cudaDeviceProp deviceProps;
+//         cudaGetDeviceProperties(&deviceProps, i);
+//         name = deviceProps.name;
 
-    for(int i = 0; i < deviceCount; i++)
-	{
-        cudaDeviceProp deviceProps;
-        cudaGetDeviceProperties(&deviceProps, i);
-        name = deviceProps.name;
-
-        printf("Device %d: %s\n", i, deviceProps.name);
-        printf("   SMs:        %d\n", deviceProps.multiProcessorCount);
-        printf("   Global mem: %.0f MB\n", static_cast<float>(deviceProps.totalGlobalMem) / (1024 * 1024));
-        printf("   CUDA Cap:   %d.%d\n", deviceProps.major, deviceProps.minor);
-    }
-    printf("---------------------------------------------------------\n");
-}
+//         printf("Device %d: %s\n", i, deviceProps.name);
+//         printf("   SMs:        %d\n", deviceProps.multiProcessorCount);
+//         printf("   Global mem: %.0f MB\n", static_cast<float>(deviceProps.totalGlobalMem) / (1024 * 1024));
+//         printf("   CUDA Cap:   %d.%d\n", deviceProps.major, deviceProps.minor);
+//     }
+//     printf("---------------------------------------------------------\n");
+// }
 
 __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory)
 {
@@ -401,9 +398,9 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 	}
 }
 
-__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, unsigned int memorySize)
+__global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry)
 {
-    unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
 
 	uint8_t* memory = globalMemory + (memorySize * index);
 
@@ -414,16 +411,18 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, un
 		state.x[i] = 0;
 	}
 
-	state.pc = 0;
+	state.pc = entry;
 
 	uint32_t const DONE_ADDRESS_CUDA = 0xfffffff0;
 	
 	state.x[1] = DONE_ADDRESS_CUDA;
-	state.x[2] = memorySize;
+	state.x[2] = argv;
 
-	state.x[10] = index % 4;
+	state.x[10] = argc;
+	state.x[11] = argv;
 
-	while(1)
+	int count = 0;
+	while(count < 1000)
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
 		printf("executing instruction: %08x\n", inst);
@@ -433,59 +432,134 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, un
 		{
 			break;
 		}
+		count++;
 	}
 }
 
+// TODO
+// STEP 0: Accepts entry point (30 min)
+// STEP 1: Cuda program accepts inputs (30 min)
+// STEP 2: Cuda program can record (save where we jumped from + where we jumped to) (1 hour)
+// STEP 3: Mutation engine (1 hour)
+
 int main(int argc, char** argv)
-{
-    if(argc != 3)
+{	
+    if(argc < 3)
 	{
-        printf("Pass two arguments, the filename and the entry address.\n");
+        printf("Format: <program file to execute> <entry address as a number in hex> <args to be passed to subject program>");
         return 1;
     }
 
+    uint32_t const MEMORY_SIZE = 4 * 64; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
+	uint32_t const INSTANCE_COUNT = 4;
+
+	// First step: program instructions
+	// Reading the program instructions into a buffer
     FILE* programFile = fopen(argv[1], "rb");
-    if (!programFile) {
+    if(!programFile)
+	{
         printf("Couldn't open program file \"%s\".\n", argv[1]);
         return 1;
     }
-    fseek(programFile, 0L, SEEK_END); // Technically it wants a long... but
-    // The program file cannot possibly be more than can fit in a 32 because it's 32 bit lol
-    const auto programSize = ftell(programFile);
+    fseek(programFile, 0, SEEK_END); 
+    uint32_t const programSize = ftell(programFile);
     rewind(programFile);
-
-    uint8_t* memory = nullptr;
-    uint8_t* program = nullptr;
-
-    memory = static_cast<uint8_t*>(malloc(MEMORY_SIZE + programSize));
-    if (!memory) {
-        printf("Failed to allocate memory for the emulator.\n");
+	uint8_t* program = (uint8_t*)malloc(programSize);
+    if(!program)
+	{
+        printf("Failed to allocate enough memory for the instructions for the emulator.\n");
         return 1;
     }
-    program = memory + MEMORY_SIZE;
-    fread(program, sizeof(uint8_t), programSize, programFile);
-
-	setup();
-
-    uint8_t* deviceProgramImage;
-	cudaError_t mallocErrorCode = cudaMalloc(&deviceProgramImage, sizeof(uint8_t) * programSize);
-	if(mallocErrorCode != cudaSuccess)
+    fread(program, sizeof(uint8_t), programSize, programFile); // We're offset by 4 so we can force 0 addr to be special
+	// At this point, host has the program instructions in memory
+	uint8_t* deviceProgramImage;
+	cudaError_t programMallocErrorCode = cudaMalloc(&deviceProgramImage, programSize);
+	if(programMallocErrorCode != cudaSuccess)
 	{
-		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocErrorCode));
+		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(programMallocErrorCode));
+		return 1;
 	}
-	cudaMemcpy(deviceProgramImage, program, sizeof(uint8_t) * programSize, cudaMemcpyHostToDevice);
+	cudaMemcpy(deviceProgramImage, program, programSize, cudaMemcpyHostToDevice);
+	// At this point, device has the program instructions in memory
 
-	dim3 blockDim(16);
-	dim3 gridDim(1);
-
+	// Second step: we need to initialize the state for the processor. This means setting register 0 to all 0s,
+	// setting register 1 to the done address (right after last instruction in program), setting register 1 to the top of the stack,
+	// setting register 10 to argc, and setting register 11 to argv. To calculate done address and top of stack, we just need to the
+	// size of the program and the size of the argument strings, so that means we need to have the input already
+	// We also need to set pc, which is constant across instances. All these things we pass when we invoke the kernel
+	
+	// Third step: input (we're going to base all of our program variability on argv)
+	// So we need to produce images of the arguments to send to the device. This is going to reside just above the instance's stack
+	// Basically: every instance needs space for initial stuff + some actual stack memory to execute with
+	// Nothing is on the stack to start, we pass argc and argv by setting registers 10 and 11
+	// So above the stack we have: actual strings, then pointers to them pointed to by argv, then the actual stack
+	// So now we allocate the memory images for the program
+	uint8_t* memory = (uint8_t*)malloc(MEMORY_SIZE * INSTANCE_COUNT);
+	if(!memory)
+	{
+		printf("Failed to allocate enough memory for the emulator.\n");
+		return 1;
+	}
+	// For now, we're literally just going to pass through arguments from our actual call of this program.
+	// So argv[3..] correspond to argv[1..] in the subject program and argv[1] in our program is argv[0] in subject
+	int32_t argcSubj = argc - 2;
+	uint32_t* argvSubjOffsets = (uint32_t*)malloc(argcSubj * sizeof(uint32_t));
+	argvSubjOffsets[0] = strlen(argv[1]) + 1;
+	strncpy((char*)(memory + (MEMORY_SIZE - argvSubjOffsets[0])), argv[1], argvSubjOffsets[0]);
+	for(int32_t i = 1; i < argcSubj; i++)
+	{
+		// Can't use stpcpy because we need to know size before hand because we are storing "backwards" because we only know
+		// Higher address because stack grows down
+		uint32_t tempLength = strlen(argv[i + 2]) + 1;
+	    argvSubjOffsets[i] = tempLength + argvSubjOffsets[0];
+		if(argvSubjOffsets[i] > MEMORY_SIZE)
+		{
+			printf("MEMORY_SIZE insufficient to store arg strings for subject program\n");
+			return 1;
+		}
+		strncpy((char*)(memory + (MEMORY_SIZE - argvSubjOffsets[i])), argv[i + 2], tempLength);
+	}
+	
+	// Still need to copy the pointers to these
+	uint32_t argvArrayEnd = argvSubjOffsets[argcSubj - 1];
+	argvArrayEnd = argvArrayEnd + ((4 - (argvArrayEnd % 4)) % 4); // Alignment...
+	if(argvArrayEnd + (4 * argcSubj) >= MEMORY_SIZE)
+	{
+		printf("MEMORY_SIZE insufficient to store arg strings for subject program\n");
+		return 1;
+	}
+	for(int32_t i = 0; i < argcSubj; i++)
+	{
+		// All programs see their memory as offset relative to their own memory chunk so this is ok to copy
+		*(uint32_t*)(memory + (MEMORY_SIZE - argvArrayEnd - (4 * (i + 1)))) = MEMORY_SIZE - argvSubjOffsets[argcSubj - i];
+	}
+	// Now all args are copied to the first instances host memory, so we copy them to all the instances
+	uint32_t stackStart = MEMORY_SIZE - (argvArrayEnd + (argcSubj * 4)); // Remember, starting stack pointer value is not usable immediately, dec first, so this ok
+	for(uint32_t i = 1; i < INSTANCE_COUNT; i++)
+	{
+		// Make sure memory size is big enough or problems will happen
+		memcpy(memory + ((MEMORY_SIZE * i) + stackStart), memory + stackStart, MEMORY_SIZE - stackStart);
+	}
+	// Finally can copy all of them to device... a little wasteful, since much of this will be zeroes, but I figure better than many small calls
+	// could theoretically seperate these regions of memory but would require complex redirect system on emulator memory system...
 	uint8_t* deviceMemoryImage;
-	cudaError_t mallocMemoryImageError = cudaMalloc(&deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x);
+    cudaError_t mallocMemoryImageError = cudaMalloc(&deviceMemoryImage, MEMORY_SIZE * INSTANCE_COUNT);
 	if(mallocMemoryImageError != cudaSuccess)
 	{
 		printf("FAILED TO CUDA MALLOC: %s\n", cudaGetErrorString(mallocMemoryImageError));
+		return 1;
 	}
-		
-	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE);
+	cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
+	free(argvSubjOffsets);
+	// Should now have both program and memory images on the device
+
+	// TODO fix this later
+	dim3 blockDim(INSTANCE_COUNT);
+	dim3 gridDim(1);
+
+	uint32_t entryPoint = (uint32_t)atoi(argv[2]);
+	
+	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint);
 
 	cudaError_t errorCode = cudaPeekAtLastError();
 	if(errorCode != cudaSuccess)
@@ -494,12 +568,10 @@ int main(int argc, char** argv)
 	}
 	cudaDeviceSynchronize();
 
-	uint8_t* memDump = (uint8_t*)malloc(sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x);
-
-	cudaMemcpy(memDump, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * blockDim.x * gridDim.x, cudaMemcpyDeviceToHost);
+	cudaMemcpy(memory, deviceMemoryImage, sizeof(uint8_t) * MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyDeviceToHost);
 
 	uint32_t const BYTES_PER_LINE = 4 * 4;
-	for(uint32_t j = 0; j < blockDim.x * gridDim.x; j++)
+	for(uint32_t j = 0; j < INSTANCE_COUNT; j++)
 	{
 		for(uint32_t i = 0; i < MEMORY_SIZE; i += 1)
 		{
@@ -507,17 +579,16 @@ int main(int argc, char** argv)
 			{
 				printf("\n");
 			}
-			printf("%02x ", *(uint8_t*)(memDump + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
+			printf("%02x ", *(uint8_t*)(memory + (j * MEMORY_SIZE) + MEMORY_SIZE - i - 1));
 		}
 		printf("\n");
 	}
-
-	free(memDump);
 	
 	cudaFree(deviceProgramImage);
 	cudaFree(deviceMemoryImage);
 	
     free(memory);
+	free(program);
 
     return 0;
 }
