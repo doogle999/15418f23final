@@ -18,15 +18,17 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	if(compare(argv[1], "123"))
+	char word[4] = {65, 66, 67, 0};
+
+	if(compare(argv[1], "123") == 0)
 	{
-		outbuffer[0] = 7;
+		outbuffer[0] = 0xffeeacac;
 		outbuffer[1] = 8;
 		outbuffer[2] = 9;
 	}
 	else
 	{
-		outbuffer[0] = 1;
+		outbuffer[0] = 0xabcd1234;
 		outbuffer[1] = 2;
 		outbuffer[2] = 3;
 	}
