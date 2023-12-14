@@ -38,7 +38,7 @@ typedef struct State
 //     printf("---------------------------------------------------------\n");
 // }
 
-__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory)
+__device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8_t* memory, uint32_t memorySize, uint32_t programSize)
 {
 	// Normally this is the destination register, but in S and B type instructions
 	// where there is not destination register these same bits communicate parts of an immediate
@@ -161,34 +161,42 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				imm |= 0xfffff000;
 			}
 			// funct3 again
+			uint32_t memOffset = (state->x[rs1] + imm);
+			// TODO: we're halfway to supporting function pointers, but not there yet:
+			// need to adjust 
 			switch((inst >> 12) & 0x7)
 			{
 				case 0x0: // lb
 				{
-					uint8_t loaded = *(uint8_t*)(memory + (state->x[rs1] + imm));
+					if(memOffset >= memorySize || memOffset <= programSize) { break; }
+					uint8_t loaded = *(uint8_t*)(memory + memOffset);
 					state->x[rd] = (loaded & (1 << 7)) ? loaded | 0xffffff00 : loaded;
 					break;
 				}
 				case 0x1: // lh
 				{
-					uint16_t loaded = *(uint16_t*)(memory + (state->x[rs1] + imm));
+					if((memOffset + 1) >= memorySize || memOffset <= programSize) { break; }
+					uint16_t loaded = *(uint16_t*)(memory + memOffset);
 					state->x[rd] = (loaded & (1 << 15)) ? loaded | 0xffff0000 : loaded;
 					break;
 				}
 				case 0x2: // lw
 				{
-					state->x[rd] = *(uint32_t*)(memory + (state->x[rs1] + imm));
+					if((memOffset + 3) >= memorySize || memOffset <= programSize) { break; }
+					state->x[rd] = *(uint32_t*)(memory + memOffset);
 					break;
 				}
 				case 0x4: // lbu
 				{
-					uint8_t loaded = *(uint8_t*)(memory + (state->x[rs1] + imm));
+					if(memOffset >= memorySize || memOffset <= programSize) { break; }
+					uint8_t loaded = *(uint8_t*)(memory + memOffset);
 					state->x[rd] = loaded & 0x000000ff;
 					break;
 				}
 				case 0x5: // lhu
 				{
-					uint16_t loaded = *(uint16_t*)(memory + (state->x[rs1] + imm));
+					if((memOffset + 1) >= memorySize || memOffset <= programSize) { break; }
+					uint16_t loaded = *(uint16_t*)(memory + memOffset);
 					state->x[rd] = loaded & 0x0000ffff;
 					break;
 				}
@@ -426,7 +434,7 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 	{
 		uint32_t inst = *(uint32_t*)(program + state.pc);
 		printf("executing instruction: %08x\n", inst);
-	    executeInstruction(&state, inst, memory);
+	    executeInstruction(&state, inst, memory, memorySize, programSize);
 		printf("pc = %u\n", state.pc);
 		if(state.pc == DONE_ADDRESS_CUDA)
 		{
@@ -557,7 +565,7 @@ int main(int argc, char** argv)
 	dim3 blockDim(INSTANCE_COUNT);
 	dim3 gridDim(1);
 
-	uint32_t entryPoint = (uint32_t)atoi(argv[2]);
+	uint32_t entryPoint = (uint32_t)strtol(argv[2], NULL, 16);
 	
 	kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint);
 
