@@ -1,0 +1,33 @@
+digraph G {
+    node [shape=box];
+    Host;
+    MPI;
+    GPU_Backend;
+    CPU_Backends;
+    AVX512_JIT;
+    Fallback_Interpreter;
+    node [shape=ellipse];
+
+    GPU_Node1 [label="GPU Node 1"];
+    GPU_Node2 [label="GPU Node 2"];
+
+    Core_1 [label="Core 1"];
+    Core_2 [label="Core 2"];
+    Core_3 [label="Core 3"];
+    Core_4 [label="Core 4"];
+
+    Host -> MPI
+    MPI -> GPU_Backend;
+    MPI -> CPU_Backends;
+    GPU_Backend -> GPU_Node1;
+    GPU_Backend -> GPU_Node2;
+
+    CPU_Backends -> AVX512_JIT;
+    CPU_Backends -> Fallback_Interpreter;
+
+    AVX512_JIT -> Core_1;
+    AVX512_JIT -> Core_2;
+
+    Fallback_Interpreter -> Core_3;
+    Fallback_Interpreter -> Core_4;
+}
