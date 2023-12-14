@@ -1,6 +1,12 @@
 int checkIfGood(int x)
 {
-	return x == 1;
+	return x == 2;
+}
+
+int compare(char const* a, char const* b)
+{	
+	while(*a && (*(a++) == *(b++))) {}
+	return *(unsigned char const*)a - *(unsigned char const*)b;
 }
 
 int main(int argc, char** argv)
@@ -8,6 +14,11 @@ int main(int argc, char** argv)
     int outbuffer[3];
 	
 	if(checkIfGood(argc))
+	{
+		return 1;
+	}
+
+	if(compare(argv[1], "123"))
 	{
 		outbuffer[0] = 7;
 		outbuffer[1] = 8;
