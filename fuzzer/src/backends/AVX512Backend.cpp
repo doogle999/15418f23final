@@ -1,18 +1,9 @@
 #include <iostream>
+#include <fstream>
 
 #include "backends/AVX512Backend.hpp"
 #include "spdlog/spdlog.h"
 #include "strategies/SimpleFuzzingStrategies.hpp"
-
-
-#include <fstream>
-
-class MyErrorHandler : public asmjit::ErrorHandler {
-public:
-    void handleError(asmjit::Error err, const char* message, asmjit::BaseEmitter* origin) override {
-        spdlog::error("AsmJit error: {}", message);
-    }
-};
 
 void AVX512Backend::run() {
     spdlog::info("The AVX512 backend is a JIT. It doesn't run anything! Look out for an output.");
@@ -40,7 +31,6 @@ void AVX512Backend::run() {
     const auto textCode = text->data();
 
     for (auto i = 0ull; i < textSize; i++) {
-        spdlog::info("Dumping byte {} of {}", i, textSize);
         output << std::format("{:02x}", textCode[i]);
     }
 
@@ -56,7 +46,7 @@ void AVX512Backend::run() {
 void AVX512Backend::emitInstruction(const Instruction& instruction) {
     thread_local uint8_t scratch512b1[LANE_COUNT]{};
     thread_local uint8_t scratch512b2[LANE_COUNT]{};
-    thread_local std::int64_t instructionNumber{-1};
+    thread_local std::int64_t instructionNumber{0};
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
     assembler.bind(labels[instructionNumber]);
@@ -72,7 +62,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
         assembler.vmovdqu64(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc)));
-        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(reinterpret_cast<std::uint64_t>(&state.pc)));
+        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc)));
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc[0])));
         assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
         assembler.vpcmpd(EXECUTION_CONTROL_REGISTER, asmjit::x86::zmm1, TMP_DATA_REGISTER,
@@ -624,7 +614,6 @@ AVX512Backend::AVX512Backend(std::uint8_t* memory, State state, std::size_t prog
     this->program              = memory + MEMORY_SIZE; // Write-only!
     this->laneLocalMemory      = std::make_unique<std::uint8_t[]>(MEMORY_SIZE * LANE_COUNT);
     code.init(runtime.environment(), asmjit::CpuFeatures::X86::kMaxValue);
-    code.setErrorHandler(new MyErrorHandler());
     code.attach(&assembler);
     assembler.addDiagnosticOptions(asmjit::DiagnosticOptions::kValidateAssembler);
 
