@@ -364,6 +364,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     break;
                 }
             }
+
+            break;
         }
         case Opcode::STORE: { // TODO: Instrument instrument instrument
             spdlog::info("In Opcode::STORE.");
