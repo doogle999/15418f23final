@@ -161,7 +161,7 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 				imm |= 0xfffff000;
 			}
 			// funct3 again
-			uint32_t memOffset = (state->x[rs1] + imm);
+			int32_t memOffset = (state->x[rs1] + (int32_t)imm);
 
 			uint32_t funct3 = (inst >> 12) & 0x7;
 			uint32_t extra = 0;
@@ -241,17 +241,17 @@ __device__ __inline__ void executeInstruction(State* state, uint32_t inst, uint8
 			{
 				case 0x0: // sb
 				{
-					*(uint8_t*)(memory + (state->x[rs1] + imm)) = state->x[rs2];
+					*(uint8_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				case 0x1: // sh
 				{
-					*(uint16_t*)(memory + (state->x[rs1] + imm)) = state->x[rs2];
+					*(uint16_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				case 0x2: // sw
 				{
-					*(uint32_t*)(memory + (state->x[rs1] + imm)) = state->x[rs2];
+					*(uint32_t*)(memory + (state->x[rs1] + (int32_t)imm)) = state->x[rs2];
 					break;
 				}
 				// TODO: handle default?
