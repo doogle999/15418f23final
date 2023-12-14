@@ -28,6 +28,11 @@ enum class Opcode {
     SYSCALL = 0x73,
 };
 
+enum class BranchTakenStatus {
+    BRANCH_NOT_TAKEN = 0b10,
+    BRANCH_TAKEN = 0b1,
+};
+
 struct Instruction {
     MachineWord raw;
 

@@ -1,5 +1,5 @@
-#include <iostream>
 #include <fstream>
+#include <iostream>
 
 #include "backends/AVX512Backend.hpp"
 #include "spdlog/spdlog.h"
@@ -36,7 +36,7 @@ void AVX512Backend::run() {
 
     asmjit::String encodedOpcode;
     encodedOpcode.appendHex(text->data(), text->bufferSize());
-    printf("Dump: %s\n", encodedOpcode.data());
+    spdlog::info("Dump (their way): {}", encodedOpcode.data());
 
     output << '\n';
 
@@ -47,14 +47,18 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
     thread_local uint8_t scratch512b1[LANE_COUNT]{};
     thread_local uint8_t scratch512b2[LANE_COUNT]{};
     thread_local std::int64_t instructionNumber{0};
+    thread_local std::int64_t conditionalBranchNumber{0};
     const auto opcode = static_cast<Opcode>(instruction.opcode());
 
     assembler.bind(labels[instructionNumber]);
 
     instructionNumber++;
 
-    // TODO: Think harder about memory layout + masking :(
-    // TODO: think also about PC
+    if (instructionNumber > MAX_NUMBER_OF_INSTRUCTIONS) {
+        spdlog::error("Maxed out the number of instructions supported. Consider changing MAX_NUMBER_OF_INSTRUCTIONS "
+                      "(currently {}).",
+                      MAX_NUMBER_OF_INSTRUCTIONS);
+    }
 
     // Part of control flow performance impact modeling
     // (Yay, EVEX & good hardware!)
@@ -62,12 +66,14 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
         assembler.vmovdqu64(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc)));
-        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc)));
+        assembler.vmovdqu64(asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc)));
         assembler.mov(RAX, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&state.pc[0])));
         assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
         assembler.vpcmpd(EXECUTION_CONTROL_REGISTER, asmjit::x86::zmm1, TMP_DATA_REGISTER,
                          asmjit::x86::VCmpImm::kEQ_OQ);
-        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
+        assembler.vmovdqu64(asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
         assembler.vpxorq(TMP_DATA_REGISTER, TMP_DATA_REGISTER, TMP_DATA_REGISTER);
     }
 
@@ -128,7 +134,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             } else if (!ADVANCED_BASIC_BLOCK_SUPPORT) {
                 assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
                 assembler.vmovdqu64(asmjit::x86::zmm(instruction.rd()),
-                                  asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+                                    asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
                 assembler.mov(EAX, imm);
                 assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
                 assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
@@ -140,7 +146,7 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             } else {
                 assembler.mov(TMP_SCALAR_REGISTER, &state.pc);
                 assembler.vmovdqu64(asmjit::x86::zmm(instruction.rd()),
-                                  asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
+                                    asmjit::x86::ptr(TMP_SCALAR_REGISTER)); // rd = pc
                 assembler.mov(EAX, imm);
                 assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
                 assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // + imm
@@ -170,8 +176,8 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.vpaddd(dst, dst, TMP_DATA_REGISTER); // rd = pc + 4
 
             assembler.mov(EAX, imm);
-            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);                              // tmp = imm
-            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src);                 // tmp = rs1 + imm
+            assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);                                // tmp = imm
+            assembler.vpaddd(TMP_DATA_REGISTER, TMP_DATA_REGISTER, src);                   // tmp = rs1 + imm
             assembler.vmovdqu64(asmjit::x86::ptr(TMP_SCALAR_REGISTER), TMP_DATA_REGISTER); // pc = tmp = rs1 + imm
 
             if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
@@ -232,6 +238,21 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                 }
             }
 
+            // this is dumb but asmjit is being weird :(
+            if (ADVANCED_BASIC_BLOCK_SUPPORT) {
+                assembler.mov(asmjit::x86::r14, static_cast<int>(BranchTakenStatus::BRANCH_TAKEN));
+                assembler.mov(asmjit::x86::r15, static_cast<int>(BranchTakenStatus::BRANCH_NOT_TAKEN));
+                assembler.kmovd(RAX, TMP_MASK_REGISTER);
+                assembler.cmp(RAX, RAX);
+                assembler.cmovnz(asmjit::x86::r13, asmjit::x86::r14);
+                assembler.cmovz(asmjit::x86::r12, asmjit::x86::r15);
+                assembler.mov(RAX, asmjit::x86::r12);
+                assembler.xor_(RAX, asmjit::x86::r13);
+                assembler.mov(asmjit::x86::r11, asmjit::x86::ptr(asmjit::x86::r12)); // ...
+                assembler.or_(asmjit::x86::al, asmjit::x86::r11b);                   // ...
+                assembler.mov(asmjit::x86::ptr(asmjit::x86::r12), asmjit::x86::al);  // ...
+            }
+
             // backup zmm1 (spill)
             assembler.mov(RAX, &scratch512b1);
             assembler.vmovdqu64(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
@@ -253,11 +274,14 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             assembler.k(TMP_MASK_REGISTER).vmovdqu32(asmjit::x86::ptr(RAX), asmjit::x86::zmm1);
 
             // restore from spill
-            assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b1)));
+            assembler.vmovdqu64(asmjit::x86::zmm1,
+                                asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b1)));
 
             if constexpr (ADVANCED_BASIC_BLOCK_SUPPORT) {
                 assembler.jmp(labels[instructionNumber + imm / 4]);
             }
+
+            conditionalBranchNumber++;
 
             break;
         }
@@ -353,8 +377,10 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
             switch (fn3) {
                 case 0x0: { // SB
                     // ok this is sick
-                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b1)), asmjit::x86::zmm1);
-                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b2)), asmjit::x86::zmm2);
+                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b1)),
+                                        asmjit::x86::zmm1);
+                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<uint64_t>(&scratch512b2)),
+                                        asmjit::x86::zmm2);
 
                     assembler.vgatherdps(asmjit::x86::zmm1,
                                          asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0));
@@ -376,15 +402,23 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     assembler.vscatterdps(asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0),
                                           asmjit::x86::zmm1);
 
-                    assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)));
-                    assembler.vmovdqu64(asmjit::x86::zmm2, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)));
+                    assembler.vmovdqu64(
+                            asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)));
+                    assembler.vmovdqu64(
+                            asmjit::x86::zmm2,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)));
 
                     break;
                 }
                 case 0x1: { // SH
                     // i wonder if this actually works
-                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)), asmjit::x86::zmm1);
-                    assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)), asmjit::x86::zmm2);
+                    assembler.vmovdqu64(
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)),
+                            asmjit::x86::zmm1);
+                    assembler.vmovdqu64(
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)),
+                            asmjit::x86::zmm2);
 
                     assembler.vgatherdps(asmjit::x86::zmm1,
                                          asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0));
@@ -405,8 +439,12 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
                     assembler.vscatterdps(asmjit::x86::dword_ptr(TMP_SCALAR_REGISTER, TMP_DATA_REGISTER, 0),
                                           asmjit::x86::zmm1);
 
-                    assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)));
-                    assembler.vmovdqu64(asmjit::x86::zmm2, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)));
+                    assembler.vmovdqu64(
+                            asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b1)));
+                    assembler.vmovdqu64(
+                            asmjit::x86::zmm2,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(&scratch512b2)));
 
                     break;
                 }
@@ -521,10 +559,10 @@ void AVX512Backend::emitInstruction(const Instruction& instruction) {
 
             switch (instruction.funct3()) {
                 case 0x00: {                                   // ADD, SUB (ok)
-                    if (instruction.isSecondHighestBitSet()) { // ADD
-                        assembler.vpaddq(dst, rs1, rs2);
-                    } else { // SUB
+                    if (instruction.isSecondHighestBitSet()) { // SUB
                         assembler.vpsubq(dst, rs1, rs2);
+                    } else { // SUB
+                        assembler.vpaddq(dst, rs1, rs2);
                     }
                     break;
                 }
@@ -594,11 +632,15 @@ incrementPC:
         // If we're just doing basic blocks, then we don't even need to think about PC.
         assembler.mov(RAX, 4);
         assembler.vpbroadcastd(TMP_DATA_REGISTER, EAX);
-        assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)), asmjit::x86::zmm1);
-        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(state.pc)));
+        assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)),
+                            asmjit::x86::zmm1);
+        assembler.vmovdqu64(asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(state.pc)));
         assembler.vpaddd(TMP_DATA_REGISTER, asmjit::x86::zmm1, TMP_DATA_REGISTER);
-        assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)), TMP_DATA_REGISTER);
-        assembler.vmovdqu64(asmjit::x86::zmm1, asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
+        assembler.vmovdqu64(asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)),
+                            TMP_DATA_REGISTER);
+        assembler.vmovdqu64(asmjit::x86::zmm1,
+                            asmjit::x86::ptr(asmjit::x86::rip, reinterpret_cast<std::uint64_t>(scratch512b1)));
     }
 
 // Zero the zero register lol considerably more straightforward
