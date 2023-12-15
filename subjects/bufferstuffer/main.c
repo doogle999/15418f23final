@@ -6,10 +6,16 @@ int main(int argc, char** argv)
 	buf[1] = 'b';
 	buf[2] = 'c';
 
-	*(short*)(buf + 3) = 0x12ab;
+	short shortbuf[2];
 
-	*(int*)(buf + 5) = 0xfedc9876;
+	shortbuf[0] = 0x12ab;
+	shortbuf[1] = 0x34cd;
 
+	buf[3] = 0;
+	buf[4] = 1;
+	buf[5] = 2;
+	buf[6] = 3;
+	buf[7] = 4;
 	buf[8] = 'd';
 	buf[9] = 'e';
 

@@ -23,6 +23,16 @@ typedef struct State
 	uint32_t x[32];
 } State;
 
+typedef struct Memory
+{
+	// Raw bytes in memory
+	uint8_t* raw;
+
+	// This is a 32 bitter because that's the max that RV32 can address
+	uint32_t size;
+} Memory;
+
+// Just zeroing our registers
 void initState(State& state)
 {
 	for(uint32_t i = 0; i < 32; i++)
@@ -32,6 +42,11 @@ void initState(State& state)
 	state.pc = 0;
 }
 
+// I've kept the decoding and the execution in the same step
+// Obviously this feels less "clean" then decoding, packaging it up all nice
+// and then executing the instruction later (and also allows us to decode
+// ahead of time) but I think this is actually just probably faster and it's
+// easier for prototyping
 void runInstruction(State* state, uint32_t inst, uint8_t* memory)
 {	
 	// Step 1: Figure out instruction length
@@ -458,7 +473,7 @@ int main(int argc, char** argv)
 	state.x[1] = DONE_ADDRESS;
 
 	// We set the stack pointer to 0 cuz, uh, sure
-	state.x[2] = memorySize - 4; 
+	state.x[2] = memorySize; 
 
 	while(1)
 	{
