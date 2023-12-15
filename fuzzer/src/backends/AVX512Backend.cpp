@@ -5,6 +5,8 @@
 #include "spdlog/spdlog.h"
 #include "strategies/SimpleFuzzingStrategies.hpp"
 
+// A JIT-based backend
+
 void AVX512Backend::run() {
     spdlog::info("The AVX512 backend is a JIT. It doesn't run anything! Look out for an output.");
 

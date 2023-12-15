@@ -2,6 +2,8 @@
 
 #include "backends/ClassicalBackend.hpp"
 
+// An interpreter-based backend
+
 void runInstruction(State& state, std::uint32_t inst, uint8_t* memory) {
     // Step 1: Figure out instruction length
     // Instructions come in 16 bit increments
