@@ -25,6 +25,10 @@ int main(int argc, char** argv)
 			{
 				if(COMP("aaewem"))
 				{
+					if(COMP("aaa"))
+					{
+						return 20;
+					}
 					return 0;
 				}
 				else
@@ -93,6 +97,11 @@ int main(int argc, char** argv)
 				}
 				else
 				{
+					if(COMP("aaa"))
+					{
+						// Unreachable!
+						return 22;
+					}
 					return 11;
 				}
 			}
@@ -101,12 +110,18 @@ int main(int argc, char** argv)
 		{
 			if(COMP("wxbiot"))
 			{
-				if(COMP("qztmzt"))
+				if(COMP("wxbamzt"))
 				{
+					// Hard
 					return 12;
 				}
 				else
 				{
+					if(COMP("aca"))
+					{
+						// Unreachable!
+						return 21;
+					}
 					return 13;
 				}
 			}
@@ -118,7 +133,12 @@ int main(int argc, char** argv)
 				}
 				else
 				{
-					return 15;
+					if(COMP("zzz"))
+					{
+						// Hard
+						return 15;
+					}
+					return 16;
 				}
 			}
 		}
