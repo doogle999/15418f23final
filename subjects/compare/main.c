@@ -4,7 +4,7 @@ int compare(char const* a, char const* b)
 	return *(unsigned char const*)a - *(unsigned char const*)b;
 }
 
-#define COMP(word) compare(argv[1], word) >= 0
+#define COMP(word) compare(argv[1], word) < 0
 
 int main(int argc, char** argv)
 {
@@ -12,109 +12,166 @@ int main(int argc, char** argv)
 	{
 		return -1;
 	}
-	
-	/* if(COMP()) */
-	/* { */
-	/* 	if(COMP()) */
-	/* 	{ */
-	/* 		if(COMP()) */
-	/* 		{ */
-	/* 			if(COMP()) */
-	/* 			{ */
-	/* 				return 0; */
-	/* 			} */
-	/* 			else */
-	/* 			{ */
-	/* 				return 1; */
-	/* 			} */
-	/* 		} */
-	/* 		else */
-	/* 		{ */
-	/* 			if(COMP()) */
-	/* 			{ */
-	/* 				return 2; */
-	/* 			} */
-	/* 			else */
-	/* 			{ */
-	/* 				return 3; */
-	/* 			} */
-	/* 		} */
-	/* 	} */
-	/* 	else */
-	/* 	{ */
-	/* 		if(COMP()) */
-	/* 		{ */
-	/* 			if(COMP()) */
-	/* 			{ */
-	/* 				return 4; */
-	/* 			} */
-	/* 			else */
-	/* 			{ */
-	/* 				return 5; */
-	/* 			} */
-	/* 		} */
-	/* 		else */
-	/* 		{ */
-	/* 			if(COMP()) */
-	/* 			{ */
-	/* 				return 6; */
-	/* 			} */
-	/* 			else */
-	/* 			{ */
-	/* 				return 7; */
-	/* 			} */
-	/* 		} */
-	/* 	} */
-	/* } */
-	
-	if(compare(argv[1], "hello") >= 0)
+
+	if(compare(argv[1], "secret") == 0)
 	{
-		if(compare(argv[1], "zaz") >= 0)
+		return 1337;
+	}
+    if(COMP("izpeit"))
+	{
+		if(COMP("ecoyoj"))
 		{
-			if(compare(argv[1], "zzz") >= 0)
+			if(COMP("bmehuh"))
 			{
-				return 0;
+				if(COMP("aaewem"))
+				{
+					return 0;
+				}
+				else
+				{
+					return 1;
+				}
 			}
 			else
 			{
-				return 1;
+				if(COMP("ctbthw"))
+				{
+					return 2;
+				}
+				else
+				{
+					return 3;
+				}
 			}
 		}
 		else
 		{
-			if(compare(argv[1], "sus") >= 0)
+			if(COMP("hlilri"))
 			{
-				return 2;
+				if(COMP("fhhcjm"))
+				{
+					return 4;
+				}
+				else
+				{
+					return 5;
+				}
 			}
 			else
 			{
-				return 3;
+				if(COMP("hwlyzl"))
+				{
+					return 6;
+				}
+				else
+				{
+					return 7;
+				}
 			}
 		}
 	}
 	else
 	{
-		if(compare(argv[1], "bca") >= 0)
+		if(COMP("pjujqn"))
 		{
-			if(compare(argv[1], "gull") >= 0)
+			if(COMP("noassv"))
 			{
-				return 4;
+				if(COMP("muupuy"))
+				{
+					return 8;
+				}
+				else
+				{
+					return 9;
+				}
 			}
 			else
 			{
-				return 5;
+				if(COMP("ozqnao"))
+				{
+					return 10;
+				}
+				else
+				{
+					return 11;
+				}
 			}
 		}
 		else
 		{
-			if(compare(argv[1], "aca") >= 0)
+			if(COMP("wxbiot"))
 			{
-				return 6;
+				if(COMP("qztmzt"))
+				{
+					return 12;
+				}
+				else
+				{
+					return 13;
+				}
 			}
 			else
 			{
-				return 7;
+				if(COMP("zyyfbw"))
+				{
+					return 14;
+				}
+				else
+				{
+					return 15;
+				}
 			}
 		}
 	}
+	
+	/* if(compare(argv[1], "hello") >= 0) */
+	/* { */
+	/* 	if(compare(argv[1], "zaz") >= 0) */
+	/* 	{ */
+	/* 		if(compare(argv[1], "zzz") >= 0) */
+	/* 		{ */
+	/* 			return 0; */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			return 1; */
+	/* 		} */
+	/* 	} */
+	/* 	else */
+	/* 	{ */
+	/* 		if(compare(argv[1], "sus") >= 0) */
+	/* 		{ */
+	/* 			return 2; */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			return 3; */
+	/* 		} */
+	/* 	} */
+	/* } */
+	/* else */
+	/* { */
+	/* 	if(compare(argv[1], "bca") >= 0) */
+	/* 	{ */
+	/* 		if(compare(argv[1], "gull") >= 0) */
+	/* 		{ */
+	/* 			return 4; */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			return 5; */
+	/* 		} */
+	/* 	} */
+	/* 	else */
+	/* 	{ */
+	/* 		if(compare(argv[1], "aca") >= 0) */
+	/* 		{ */
+	/* 			return 6; */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			return 7; */
+	/* 		} */
+	/* 	} */
+	/* } */
 }

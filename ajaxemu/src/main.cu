@@ -1260,16 +1260,16 @@ uint32_t argv1Len = 0;
 		cudaMemcpy(localBranchData, deviceBranchDataImage, sizeof(BranchData) * (programSize / 4), cudaMemcpyDeviceToHost);
 	}
 
-	for(uint32_t i = 0; i < (programSize / 4); i++)
-	{
-		if((((uint32_t*)program)[i] & 0x7f) == 0x63)
-		{
-			printf("pid %d, Branch at address %x was", pid, i * 4);
-			if(localBranchData[i].hasBeenTaken) printf(" taken");
-			if(localBranchData[i].hasBeenSkipped) printf(" skipped");
-			printf("\n");
-		}
-	}
+	// for(uint32_t i = 0; i < (programSize / 4); i++)
+	// {
+	// 	if((((uint32_t*)program)[i] & 0x7f) == 0x63)
+	// 	{
+	// 		printf("pid %d, Branch at address %x was", pid, i * 4);
+	// 		if(localBranchData[i].hasBeenTaken) printf(" taken");
+	// 		if(localBranchData[i].hasBeenSkipped) printf(" skipped");
+	// 		printf("\n");
+	// 	}
+	// }
 
 	MPI_Allreduce(MPI_IN_PLACE, localBranchData, 2 * (programSize / 4), MPI_UINT32_T, MPI_BOR, MPI_COMM_WORLD);
 	auto finishTime = std::chrono::high_resolution_clock::now();
