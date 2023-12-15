@@ -4,12 +4,68 @@ int compare(char const* a, char const* b)
 	return *(unsigned char const*)a - *(unsigned char const*)b;
 }
 
+#define COMP(word) compare(argv[1], word) >= 0
+
 int main(int argc, char** argv)
 {
 	if(argc != 2)
 	{
 		return -1;
 	}
+	
+	/* if(COMP()) */
+	/* { */
+	/* 	if(COMP()) */
+	/* 	{ */
+	/* 		if(COMP()) */
+	/* 		{ */
+	/* 			if(COMP()) */
+	/* 			{ */
+	/* 				return 0; */
+	/* 			} */
+	/* 			else */
+	/* 			{ */
+	/* 				return 1; */
+	/* 			} */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			if(COMP()) */
+	/* 			{ */
+	/* 				return 2; */
+	/* 			} */
+	/* 			else */
+	/* 			{ */
+	/* 				return 3; */
+	/* 			} */
+	/* 		} */
+	/* 	} */
+	/* 	else */
+	/* 	{ */
+	/* 		if(COMP()) */
+	/* 		{ */
+	/* 			if(COMP()) */
+	/* 			{ */
+	/* 				return 4; */
+	/* 			} */
+	/* 			else */
+	/* 			{ */
+	/* 				return 5; */
+	/* 			} */
+	/* 		} */
+	/* 		else */
+	/* 		{ */
+	/* 			if(COMP()) */
+	/* 			{ */
+	/* 				return 6; */
+	/* 			} */
+	/* 			else */
+	/* 			{ */
+	/* 				return 7; */
+	/* 			} */
+	/* 		} */
+	/* 	} */
+	/* } */
 	
 	if(compare(argv[1], "hello") >= 0)
 	{
