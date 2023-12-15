@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <random>
 
 #include "mpi.h"
 
@@ -956,9 +957,9 @@ void classicalExecuteProgram(uint8_t* program, uint8_t* memory, uint32_t memoryS
 
 int loadToMemory(int argc, char** argv, uint32_t INSTANCE_COUNT, uint32_t MEMORY_SIZE, uint8_t** pout, uint8_t** mout, Result** rout, BranchData** bout, uint32_t* psizeout, int32_t* acout, uint32_t* ssout, uint32_t* epout)
 {
-	if(argc < 3)
+	if(argc < 4)
 	{
-        printf("Format: <program file to execute> <entry address as a number in hex> <args to be passed to subject program>");
+        printf("Format: <program file to execute> <entry address as a number in hex> <args to be passed to subject program (at least 1)>");
         return 1;
     }
 
@@ -1036,17 +1037,25 @@ int loadToMemory(int argc, char** argv, uint32_t INSTANCE_COUNT, uint32_t MEMORY
 	}
 	// Now all args are copied to the first instances host memory, so we copy them to all the instances
 	uint32_t stackStart = MEMORY_SIZE - (argvArrayEnd + (argcSubj * 4)); // Remember, starting stack pointer value is not usable immediately, dec first, so this ok
-	char randBuf[4];
-	randBuf[3] = '\0';
-	srand(time(NULL));
+
+	char randBuf[32];
+	uint32_t maxIn = (argvSubjOffsets[1] - argvSubjOffsets[0]);
+	if(maxIn > 31)
+	{
+		maxIn = 31;
+	}
+	randBuf[maxIn] = '\0';
+    srand(time(NULL));
+
 	for(uint32_t i = 1; i < INSTANCE_COUNT; i++)
 	{
 		// Make sure memory size is big enough or problems will happen
 		memcpy(memory + ((MEMORY_SIZE * i) + stackStart), memory + stackStart, MEMORY_SIZE - stackStart);
 
-		randBuf[0] = (rand() % 26) + 97;
-		randBuf[1] = (rand() % 26) + 97;
-		randBuf[2] = (rand() % 26) + 97;
+		for(int j = 0; j < maxIn; j++)
+		{
+			randBuf[j] = (rand() % 26) + 97;
+		}
 		strncpy((char*)(memory + (MEMORY_SIZE * i) + (MEMORY_SIZE - argvSubjOffsets[1])), randBuf, (argvSubjOffsets[1] - argvSubjOffsets[0]));
 	}
 	free(argvSubjOffsets);
@@ -1146,6 +1155,7 @@ int main(int argc, char** argv)
 		}
 		cudaMemcpy(deviceProgramImage, program, programSize, cudaMemcpyHostToDevice);
 		cudaMemcpy(deviceBranchDataImage, localBranchData, sizeof(BranchData) * (programInstCount), cudaMemcpyHostToDevice);
+		cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
 	}
 	else
 	{
@@ -1155,16 +1165,45 @@ int main(int argc, char** argv)
 		}
 
 		spareMemory = (uint8_t*)malloc(MEMORY_SIZE * INSTANCE_COUNT);
+		memcpy((spareMemory + stackStart), memory + stackStart, MEMORY_SIZE - stackStart);
 	}
 
 	int goodToGo = 1;
-	
+	MPI_Barrier(MPI_COMM_WORLD);
+	auto startTime = std::chrono::high_resolution_clock::now();
+
+	MPI_Request doneReq;
+
+uint32_t argv1Len = 0; 
+
+    uint32_t maxIn = 0; 
+
+	if(pid != 0)
+	{
+		MPI_Irecv(&goodToGo,
+				  1,
+				  MPI_INT,
+				  0,
+				  0,
+				  MPI_COMM_WORLD,
+				  &doneReq);
+
+		argv1Len = strlen((char*)(spareMemory + *(uint32_t*)(spareMemory + stackStart + 4)));
+		maxIn = argv1Len;
+		if(maxIn > 31)
+		{
+			maxIn = 31;
+		}
+	}
+
+	uint64_t instancesRun = 0;
+
 	while(goodToGo)
 	{
 		if(pid == 0)
 		{
-			cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
-
+			//cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
+			
 			kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS, deviceBranchDataImage);
 
 			cudaError_t errorCode = cudaPeekAtLastError();
@@ -1173,14 +1212,48 @@ int main(int argc, char** argv)
 		        printf("FAILED TO LAUNCH KERNEL: %s\n", cudaGetErrorString(errorCode));
 	        }
 			cudaDeviceSynchronize();
+
+			goodToGo = 0;
+			for(int i = 1; i < nproc; i++)
+			{
+				MPI_Send(&goodToGo,
+						 1,
+						 MPI_INT,
+						 i,
+						 0,
+						 MPI_COMM_WORLD);
+			}
 		}
 		else
 		{
-			memcpy(spareMemory, memory, MEMORY_SIZE * INSTANCE_COUNT);
-		    classicalExecuteProgram(program, spareMemory + MEMORY_SIZE, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, localResults, MAX_OPS, localBranchData);
+			char randBuf[32];
+			randBuf[maxIn] = '\0';
+			for(int i = 0; i < maxIn; i++)
+			{
+				randBuf[i] = (rand() % 26) + 97;
+			}
+			
+			for(int i = 0; i < INSTANCE_COUNT; i++)
+			{
+				memcpy(memory + ((MEMORY_SIZE * i) + stackStart), spareMemory + stackStart, MEMORY_SIZE - stackStart);
+				// This is jsut beautiful -- we don't need to recalculate where argv[1] is because we have the stack LMAO
+				char* argv1 = (char*)(memory + (MEMORY_SIZE * i) + *(uint32_t*)(spareMemory + stackStart + 4));
+				strncpy(argv1, randBuf, maxIn);
+			}
+			
+		    classicalExecuteProgram(program, memory, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, localResults, MAX_OPS, localBranchData);
+
+			int flag = 0;
+			MPI_Test(&doneReq, &flag, MPI_STATUS_IGNORE);
 	    }
-		goodToGo = 0;
+		instancesRun += INSTANCE_COUNT;
 	}
+
+	uint64_t totalInstancesRun = 0;
+	MPI_Allreduce(&instancesRun, &totalInstancesRun, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+	
+	auto midExecTime = std::chrono::high_resolution_clock::now();
+	MPI_Barrier(MPI_COMM_WORLD);
 
 	if(pid == 0)
 	{
@@ -1199,9 +1272,14 @@ int main(int argc, char** argv)
 	}
 
 	MPI_Allreduce(MPI_IN_PLACE, localBranchData, 2 * (programSize / 4), MPI_UINT32_T, MPI_BOR, MPI_COMM_WORLD);
+	auto finishTime = std::chrono::high_resolution_clock::now();
+    printf("pid %d, Exec took %lu us, full + comm took %lu us, ran %lu instances\n", pid, std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), instancesRun);
 
+	MPI_Barrier(MPI_COMM_WORLD);
+	
 	if(pid == 0)
 	{
+	    printf("Total of %lu instances run across %d processes, 1 of which used the gpu\n", totalInstancesRun, nproc);
 		for(uint32_t i = 0; i < (programSize / 4); i++)
 		{
 			if((((uint32_t*)program)[i] & 0x7f) == 0x63)
