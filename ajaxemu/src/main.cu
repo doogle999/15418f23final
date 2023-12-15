@@ -170,13 +170,15 @@ int classicalExecuteInstruction(State* state, uint32_t inst, uint8_t* memory, ui
 			if(takeBranch)
 			{
 				uint32_t zero = 0;
-				__atomic_compare_exchange_n(&(branchResults[state->pc >> 2].hasBeenTaken), &zero, (uint32_t)1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+				__atomic_add_fetch(&(branchResults[state->pc >> 2].hasBeenTaken), 1, __ATOMIC_RELAXED);
+				//__atomic_compare_exchange_n(&(branchResults[state->pc >> 2].hasBeenTaken), &zero, (uint32_t)1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 				state->pc += (int32_t)imm;
 			}
 			else
 			{
 				uint32_t zero = 0;
-				__atomic_compare_exchange_n(&(branchResults[state->pc >> 2].hasBeenSkipped), &zero, (uint32_t)1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+				__atomic_add_fetch(&(branchResults[state->pc >> 2].hasBeenSkipped), 1, __ATOMIC_RELAXED);
+				//__atomic_compare_exchange_n(&(branchResults[state->pc >> 2].hasBeenSkipped), &zero, (uint32_t)1, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 				state->pc += 4;
 			}
 			
@@ -580,12 +582,14 @@ __device__ __inline__ int executeInstruction(State* state, uint32_t inst, uint8_
 			}
 			if(takeBranch)
 			{
-				atomicCAS(&(branchResults[state->pc >> 2].hasBeenTaken), (uint32_t)0, (uint32_t)1);
+				atomicInc(&(branchResults[state->pc >> 2].hasBeenTaken), 9999999);
+				//atomicCAS(&(branchResults[state->pc >> 2].hasBeenTaken), (uint32_t)0, (uint32_t)1);
 				state->pc += (int32_t)imm;
 			}
 			else
 			{
-				atomicCAS(&(branchResults[state->pc >> 2].hasBeenSkipped), (uint32_t)0, (uint32_t)1);
+				atomicInc(&(branchResults[state->pc >> 2].hasBeenSkipped), 9999999);
+				//atomicCAS(&(branchResults[state->pc >> 2].hasBeenSkipped), (uint32_t)0, (uint32_t)1);
 				state->pc += 4;
 			}
 			
@@ -923,7 +927,7 @@ __global__ void kernelExecuteProgram(uint8_t* program, uint8_t* globalMemory, ui
 	myResults->errorCode = state.x[0]; // If we have an error, just write to x[0] and self destruct out of the loop
 }
 
-void classicalExecuteProgram(uint8_t* program, uint8_t* memory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry, Result* results, uint32_t maxOps, BranchData* branchResults)
+uint64_t classicalExecuteProgram(uint8_t* program, uint8_t* memory, uint32_t memorySize, int32_t argc, uint32_t argv, uint32_t programSize, uint32_t entry, Result* results, uint32_t maxOps, BranchData* branchResults)
 {
 	State state;
 	for(int i = 0; i < 32; i++)
@@ -953,6 +957,8 @@ void classicalExecuteProgram(uint8_t* program, uint8_t* memory, uint32_t memoryS
 
 	results->returnVal = state.x[10];
     results->errorCode = state.x[0]; // If we have an error, just write to x[0] and self destruct out of the loop
+
+	return count;
 }
 
 int loadToMemory(int argc, char** argv, uint32_t INSTANCE_COUNT, uint32_t MEMORY_SIZE, uint8_t** pout, uint8_t** mout, Result** rout, BranchData** bout, uint32_t* psizeout, int32_t* acout, uint32_t* ssout, uint32_t* epout)
@@ -1112,8 +1118,8 @@ int main(int argc, char** argv)
 
 	uint8_t* spareMemory;
 
-	dim3 blockDim(256);
-	dim3 gridDim(16);
+	dim3 blockDim(512);
+	dim3 gridDim(32);
 
 	uint32_t const MAX_OPS = 10000;	
 	uint32_t const MEMORY_SIZE = 4 * 1024; // This needs to be 4 byte aligned or bad things happen because cuda memory access rules
@@ -1174,7 +1180,7 @@ int main(int argc, char** argv)
 
 	MPI_Request doneReq;
 
-uint32_t argv1Len = 0; 
+	uint32_t argv1Len = 0; 
 
     uint32_t maxIn = 0; 
 
@@ -1197,6 +1203,7 @@ uint32_t argv1Len = 0;
 	}
 
 	uint64_t instancesRun = 0;
+	uint64_t instructionsRun = 0;
 
 	while(goodToGo)
 	{
@@ -1204,7 +1211,7 @@ uint32_t argv1Len = 0;
 		{
 			//cudaMemcpy(deviceMemoryImage, memory, MEMORY_SIZE * INSTANCE_COUNT, cudaMemcpyHostToDevice);
 			
-			kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS, deviceBranchDataImage);
+		    kernelExecuteProgram<<<gridDim, blockDim>>>(deviceProgramImage, deviceMemoryImage, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, deviceResultImage, MAX_OPS, deviceBranchDataImage);
 
 			cudaError_t errorCode = cudaPeekAtLastError();
 			if(errorCode != cudaSuccess)
@@ -1241,7 +1248,7 @@ uint32_t argv1Len = 0;
 				strncpy(argv1, randBuf, maxIn);
 			}
 			
-		    classicalExecuteProgram(program, memory, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, localResults, MAX_OPS, localBranchData);
+			instructionsRun += classicalExecuteProgram(program, memory, MEMORY_SIZE, argcSubj, stackStart, programSize, entryPoint, localResults, MAX_OPS, localBranchData);
 
 			int flag = 0;
 			MPI_Test(&doneReq, &flag, MPI_STATUS_IGNORE);
@@ -1250,7 +1257,9 @@ uint32_t argv1Len = 0;
 	}
 
 	uint64_t totalInstancesRun = 0;
+	uint64_t totalInstructionsRun = 0;
 	MPI_Allreduce(&instancesRun, &totalInstancesRun, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+	MPI_Allreduce(&instructionsRun, &totalInstructionsRun, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
 	
 	auto midExecTime = std::chrono::high_resolution_clock::now();
 	MPI_Barrier(MPI_COMM_WORLD);
@@ -1271,23 +1280,33 @@ uint32_t argv1Len = 0;
 	// 	}
 	// }
 
-	MPI_Allreduce(MPI_IN_PLACE, localBranchData, 2 * (programSize / 4), MPI_UINT32_T, MPI_BOR, MPI_COMM_WORLD);
+	// MPI_Allreduce(MPI_IN_PLACE, localBranchData, 2 * (programSize / 4), MPI_UINT32_T, MPI_BOR, MPI_COMM_WORLD);
+	MPI_Allreduce(MPI_IN_PLACE, localBranchData, 2 * (programSize / 4), MPI_UINT32_T, MPI_SUM, MPI_COMM_WORLD);
 	auto finishTime = std::chrono::high_resolution_clock::now();
-    printf("pid %d, Exec took %lu us, full + comm took %lu us, ran %lu instances\n", pid, std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), instancesRun);
+    // printf("pid %d, Exec took %lu us, full time taken including communication was %lu us, ran %lu instances\n", pid, std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), instancesRun);
 
 	MPI_Barrier(MPI_COMM_WORLD);
 	
 	if(pid == 0)
 	{
+		printf("Total of %lu instructions run across %lu instances on the %d CPU processes, in total time (as given by pid 0) of %lu us, of which %lu us was spent executing instructions (rest was communication or overhead) (GPU instances and instructions ignored)\n", totalInstructionsRun, totalInstancesRun - instancesRun, nproc - 1, std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count());
+		if(nproc > 1)
+		{
+			printf("Total of (approximately) %lu instructions run in %lu instances on the single GPU process (%d blocks of %d threads), in total time (as given by pid 0) of %lu us, of which %lu us was spent executing instructions (rest was communication or overhead)\n", (totalInstructionsRun * instancesRun) / (totalInstancesRun - instancesRun), instancesRun, gridDim.x, blockDim.x, std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count());
+		}
+		else
+		{
+			printf("Total of (approximately) %lu instructions run in %lu instances on the single GPU process (%d blocks of %d threads), in total time (as given by pid 0) of %lu us, of which %lu us was spent executing instructions (rest was communication or overhead) \n", instancesRun * 188, instancesRun, gridDim.x, blockDim.x, std::chrono::duration_cast<std::chrono::microseconds>(finishTime - startTime).count(), std::chrono::duration_cast<std::chrono::microseconds>(midExecTime - startTime).count());
+		}
 	    printf("Total of %lu instances run across %d processes, 1 of which used the gpu\n", totalInstancesRun, nproc);
 		for(uint32_t i = 0; i < (programSize / 4); i++)
 		{
 			if((((uint32_t*)program)[i] & 0x7f) == 0x63)
 			{
-				printf("Branch at address %x was", i * 4);
-				if(localBranchData[i].hasBeenTaken) printf(" taken");
-				if(localBranchData[i].hasBeenSkipped) printf(" skipped");
-				printf("\n");
+				printf("Branch at address %x was taken %u times, was skipped %u times\n", i * 4, localBranchData[i].hasBeenTaken, localBranchData[i].hasBeenSkipped);
+				//	if(localBranchData[i].hasBeenTaken) printf(" taken");
+				//if(localBranchData[i].hasBeenSkipped) printf(" skipped");
+				//printf("\n");
 			}
 		}
 	}
